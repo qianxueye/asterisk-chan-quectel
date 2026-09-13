@@ -60,7 +60,7 @@ struct pvt {
     unsigned int reset_modem;
     unsigned int dtmf;
     unsigned int dsci;
-    unsigned int dtmf_duration;
+    long dtmf_duration;
     int msg_storage;
     int msg_direct;
     int msg_service;
