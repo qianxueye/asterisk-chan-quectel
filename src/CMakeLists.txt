@@ -76,7 +76,8 @@ IF(IS_GIT_REPO AND BUILD_TESTING)
         FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
         ADD_TEST(NAME "PCM regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_pcm.py)
         ADD_TEST(NAME "UAC lifecycle regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_audio_lifecycle.py)
-        SET_TESTS_PROPERTIES("PCM regression" "UAC lifecycle regression" PROPERTIES
+        ADD_TEST(NAME "Registration initialization regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_registration_init.py)
+        SET_TESTS_PROPERTIES("PCM regression" "UAC lifecycle regression" "Registration initialization regression" PROPERTIES
             LABELS "AUDIO;REGRESSION"
             TIMEOUT 60
             ENVIRONMENT "CC=${CMAKE_C_COMPILER}"

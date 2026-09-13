@@ -5,6 +5,7 @@ On Linux, install a C compiler, Python 3, and ALSA development files, then run:
 ```sh
 python3 test/test_pcm.py
 python3 test/test_audio_lifecycle.py
+python3 test/test_registration_init.py
 ```
 
 `test_pcm.py` compiles the production `src/pcm.c` with test-only Asterisk stubs
@@ -42,3 +43,8 @@ The full CMake build also runs `Enum bounds regression` against the actual
 Asterisk headers. It protects startup status queries from eager `S_COR` argument
 evaluation with an unknown registration state; assertions remain enabled in
 Release builds.
+
+`test_registration_init.py` exercises the production initialization queue and
+registration response handling. It checks that Quectel reads the current LTE
+registration after common GSM initialization, including an already-attached
+LTE modem reporting CREG 0 and CEREG 1.

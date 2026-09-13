@@ -32,6 +32,16 @@ before evaluating the array access and preserves NULL/empty-string fallback.
 A regression using actual Asterisk headers reproduces the old crash and checks
 negative values, integer extremes, array boundaries and an empty table.
 
+## Initial LTE registration snapshot
+
+Quectel initialization now reads `AT+CEREG?` after enabling LTE registration
+notifications. The Quectel-specific initialization task is appended after the
+common initialization task, so this snapshot is processed after `AT+CREG?`.
+An EC20 already attached to LTE may return CREG status 0 but CEREG status 1;
+waiting only for a new notification can leave the driver marked unregistered
+until an unrelated registration change. This adds a read-only query, with no
+change to SIM/operator settings or registration-domain precedence.
+
 ## Intended behavior
 
 - Capture starts explicitly when a call becomes the UAC sound source, before
