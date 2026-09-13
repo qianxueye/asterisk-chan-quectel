@@ -64,6 +64,16 @@ INSTALL(
 )
 
 IF(IS_GIT_REPO AND BUILD_TESTING)
+    IF(NOT CMAKE_CROSSCOMPILING)
+        FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
+        ADD_TEST(NAME "PCM regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_pcm.py)
+        ADD_TEST(NAME "UAC lifecycle regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_audio_lifecycle.py)
+        SET_TESTS_PROPERTIES("PCM regression" "UAC lifecycle regression" PROPERTIES
+            LABELS "AUDIO;REGRESSION"
+            TIMEOUT 60
+            ENVIRONMENT "CC=${CMAKE_C_COMPILER}"
+        )
+    ENDIF()
     IF(DEFINED CMAKE_READELF)
         ADD_TEST(NAME "Load library" COMMAND ${CMAKE_COMMAND}
             -DCMAKE_READELF=${CMAKE_READELF}

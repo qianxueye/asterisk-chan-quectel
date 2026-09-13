@@ -103,7 +103,7 @@ void cpvt_lock(struct cpvt* const);
 void cpvt_try_lock(struct cpvt* const);
 void cpvt_unlock(struct cpvt* const);
 
-void cpvt_call_activate(struct cpvt* const cpvt);
+int cpvt_call_activate(struct cpvt* const cpvt);
 void cpvt_call_disactivate(struct cpvt* const cpvt);
 
 int cpvt_control(const struct cpvt* const cpvt, enum ast_control_frame_type control);
