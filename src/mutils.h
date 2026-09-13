@@ -19,7 +19,12 @@
 
 static inline const char* enum2str_def(const unsigned value, const char* const names[], const unsigned items, const char* const def)
 {
-    return S_COR(value < items, names[value], def);
+    /* S_COR evaluates its string argument before checking the condition.
+     * Validate the index first, including negative values converted to unsigned. */
+    if (value >= items) {
+        return def;
+    }
+    return S_OR(names[value], def);
 }
 
 static inline const char* enum2str(const unsigned value, const char* const names[], const unsigned items)

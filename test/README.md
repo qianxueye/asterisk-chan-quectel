@@ -37,3 +37,8 @@ ctest --test-dir build --output-on-failure
 The CI workflow prepares official Asterisk 22.0.0 headers and checks the complete
 module in addition to the audio regressions. Hardware call validation remains
 necessary; see [UAC recovery](../doc/uac-recovery.md).
+
+The full CMake build also runs `Enum bounds regression` against the actual
+Asterisk headers. It protects startup status queries from eager `S_COR` argument
+evaluation with an unknown registration state; assertions remain enabled in
+Release builds.

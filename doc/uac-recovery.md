@@ -22,6 +22,16 @@ framing requires 250 ms of prefill. Thresholds are calculated before ALSA's actu
 buffer and period sizes are known. Unsupported sample rates and some invalid
 capture configurations can be accepted because initialization errors are lost.
 
+## Startup status-query crash
+
+Asterisk 22 `S_COR` evaluates its string argument before checking its condition.
+The upstream enum helper passed `names[value]` as that argument, so an unknown
+registration state (`-1`, converted to unsigned) could cause SIGSEGV when a CLI
+client queried device state during initialization. The fix validates the index
+before evaluating the array access and preserves NULL/empty-string fallback.
+A regression using actual Asterisk headers reproduces the old crash and checks
+negative values, integer extremes, array boundaries and an empty table.
+
 ## Intended behavior
 
 - Capture starts explicitly when a call becomes the UAC sound source, before

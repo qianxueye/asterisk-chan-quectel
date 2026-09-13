@@ -40,7 +40,7 @@ jobs:
             libasound2-dev libsqlite3-dev libssl-dev libedit-dev uuid-dev \
             libxml2-dev libjansson-dev libncurses-dev file python3 clang-format-18
       - name: Check source formatting
-        run: clang-format-18 --dry-run --Werror src/pcm.c src/pcm.h src/channel.c src/cpvt.c src/cpvt.h src/chan_quectel.c
+        run: clang-format-18 --dry-run --Werror src/pcm.c src/pcm.h src/mutils.h src/channel.c src/cpvt.c src/cpvt.h src/chan_quectel.c
       - name: Prepare fixed Asterisk 22.0.0 headers
         working-directory: ${{ runner.temp }}
         run: |
