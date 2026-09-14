@@ -12,6 +12,10 @@
 int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* const fmt, snd_pcm_t** pcm, unsigned int* pcm_channels, int* fd);
 int pcm_close(const char* dev, snd_pcm_t** ad, snd_pcm_stream_t stream_type);
 
+/* Bounded recovery of the supplied stream only; neither helper waits for I/O. */
+int pcm_start_capture(snd_pcm_t* pcm);
+int pcm_prepare_playback(snd_pcm_t* pcm);
+
 void _pcm_show_state(int attribute_unused lvl, const char* file, int line, const char* function, const char* const pcm_desc, const char* const pvt_id,
                      snd_pcm_t* const pcm);
 

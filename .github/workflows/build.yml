@@ -1,55 +1,80 @@
-#
-# Building chan_quectel
-#
 name: Build channel
 
 on:
   workflow_dispatch:
   pull_request:
-    branches: [ "master" ]
+    branches: [master]
   push:
+    branches: [master]
+
+permissions:
+  contents: read
 
 jobs:
-  formatting-check:
-    name: Formatting Check
-    runs-on: ubuntu-latest
+  audio-regression:
+    name: Audio regressions
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-    - uses: jidicula/clang-format-action@v4.11.0
-      with:
-        clang-format-version: 18
-        check-path: src
-
-  check-openwrt:
-    name: Collect sources of OpenWRT package
-    runs-on: ubuntu-latest
-    needs: formatting-check
-    steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    - uses: ./.github/actions/install-required-packages
-    - name: Get source date epoch
-      run: ./get-source-date-epoch.sh > .env
-    - name: Configure project
-      run: ./dotenv.sh .env cmake -P configure-openwrt-makefile.cmake
-    - name: Collect sources of OpenWRT package
-      run: ./dotenv.sh .env cmake -P build-chan-quectel.cmake openwrt
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential python3 libasound2-dev
+      - name: Test PCM configuration and recovery
+        run: python3 test/test_pcm.py
+      - name: Test UAC call lifecycle and media callbacks
+        run: python3 test/test_audio_lifecycle.py
+      - name: Test initialization queue and LTE registration snapshot
+        run: python3 test/test_registration_init.py
 
   build:
-    name: Build module
-    runs-on: ubuntu-latest
-    needs: formatting-check
+    name: Asterisk 22 module
+    runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    - uses: ./.github/actions/install-required-packages
-    - name: Get source date epoch
-      run: ./get-source-date-epoch.sh > .env
-    - name: Collect build flags
-      run: ./get-build-flags.sh deb > CMakeUserPresets.json
-    - name: Configure project
-      run: ./dotenv.sh .env cmake -P make-build-dir.cmake deb
-    - name: Build
-      run: ./dotenv.sh .env cmake -P build-chan-quectel.cmake deb
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git ca-certificates curl \
+            libasound2-dev libsqlite3-dev libssl-dev libedit-dev uuid-dev \
+            libxml2-dev libjansson-dev libncurses-dev file python3 clang-format-18
+      - name: Check source formatting
+        run: clang-format-18 --dry-run --Werror src/at_command.c src/pcm.c src/pcm.h src/mutils.h src/channel.c src/cpvt.c src/cpvt.h src/chan_quectel.c
+      - name: Prepare fixed Asterisk 22.0.0 headers
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --location --retry 3 \
+            https://downloads.asterisk.org/pub/telephony/asterisk/old-releases/asterisk-22.0.0.tar.gz \
+            --output asterisk-22.0.0.tar.gz
+          echo '56973620a398bfe119ed597803177f793c99cbb9a65d87e9e6f5eaa4f37c0f1c  asterisk-22.0.0.tar.gz' | sha256sum --check
+          tar -xzf asterisk-22.0.0.tar.gz
+          cd asterisk-22.0.0
+          ./configure --prefix=/usr --without-pjproject --without-jansson-bundled
+          make menuselect.makeopts include/asterisk/buildopts.h
+          sudo make install-headers
+      - name: Configure module
+        run: cmake --preset default -S . -B build -G Ninja -DBUILD_TESTING=ON -DASTERISK_VERSION_NUM=220000
+      - name: Build module
+        run: cmake --build build --parallel 2
+      - name: Run regressions and module checks
+        run: ctest --test-dir build --output-on-failure
+
+  check-openwrt:
+    name: Collect OpenWRT package sources
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install source packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake build-essential git
+      - name: Collect sources
+        run: |
+          ./get-source-date-epoch.sh > .env
+          ./dotenv.sh .env cmake -P configure-openwrt-makefile.cmake
+          ./dotenv.sh .env cmake -P build-chan-quectel.cmake openwrt

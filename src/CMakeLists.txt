@@ -64,6 +64,25 @@ INSTALL(
 )
 
 IF(IS_GIT_REPO AND BUILD_TESTING)
+    IF(NOT CMAKE_CROSSCOMPILING)
+        ADD_EXECUTABLE(quectel-enum-test ${CMAKE_SOURCE_DIR}/test/enum_bounds.c)
+        TARGET_INCLUDE_DIRECTORIES(quectel-enum-test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        TARGET_COMPILE_DEFINITIONS(quectel-enum-test PRIVATE _GNU_SOURCE)
+        TARGET_COMPILE_FEATURES(quectel-enum-test PRIVATE c_std_99)
+        TARGET_COMPILE_OPTIONS(quectel-enum-test PRIVATE -Wall -Wextra -Werror)
+        TARGET_LINK_LIBRARIES(quectel-enum-test PRIVATE AsteriskModule)
+        ADD_TEST(NAME "Enum bounds regression" COMMAND quectel-enum-test)
+        SET_TESTS_PROPERTIES("Enum bounds regression" PROPERTIES LABELS "REGRESSION" TIMEOUT 20)
+        FIND_PACKAGE(Python3 COMPONENTS Interpreter REQUIRED)
+        ADD_TEST(NAME "PCM regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_pcm.py)
+        ADD_TEST(NAME "UAC lifecycle regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_audio_lifecycle.py)
+        ADD_TEST(NAME "Registration initialization regression" COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_registration_init.py)
+        SET_TESTS_PROPERTIES("PCM regression" "UAC lifecycle regression" "Registration initialization regression" PROPERTIES
+            LABELS "AUDIO;REGRESSION"
+            TIMEOUT 60
+            ENVIRONMENT "CC=${CMAKE_C_COMPILER}"
+        )
+    ENDIF()
     IF(DEFINED CMAKE_READELF)
         ADD_TEST(NAME "Load library" COMMAND ${CMAKE_COMMAND}
             -DCMAKE_READELF=${CMAKE_READELF}

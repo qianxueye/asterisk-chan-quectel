@@ -1,5 +1,9 @@
 # Asterisk channel driver for *Quectel* and *SimCOM* modules
 
+This fork maintains UAC startup and audio recovery fixes for the archived RoEdAl baseline.
+See the [recovery notes](doc/uac-recovery.md) and [regression tests](test/README.md);
+EC20 hardware deployment and call validation remain separate from software tests.
+
 See original [README](//github.com/IchthysMaranatha/asterisk-chan-quectel/blob/master/README.md) of this project.
 
 ----

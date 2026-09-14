@@ -82,16 +82,9 @@ static int soundcard_init(struct pvt* pvt)
         return -1;
     }
 
-    const int err = snd_pcm_link(pvt->icard, pvt->ocard);
-    if (err < 0) {
-        ast_log(LOG_ERROR, "[%s][ALSA] Couldn't link devices: %s\n", PVT_ID(pvt), snd_strerror(err));
-        snd_pcm_close(pvt->icard);
-        pvt->icard = NULL;
-        snd_pcm_close(pvt->ocard);
-        pvt->ocard          = NULL;
-        pvt->ocard_channels = 0u;
-        return -1;
-    }
+    /* RTP playback can pause independently of capture. Linking the streams
+     * makes an underrun stop both directions and prevents capture from
+     * starting until outbound media fills the playback start threshold. */
 
     ast_verb(2, "[%s][ALSA] Sound card '%s' initialized\n", PVT_ID(pvt), CONF_UNIQ(pvt, alsadev));
     return 0;
@@ -105,11 +98,13 @@ void pvt_disconnect(struct pvt* pvt)
 {
     if (!PVT_NO_CHANS(pvt)) {
         struct cpvt* cpvt;
-        AST_LIST_TRAVERSE(&(pvt->chans), cpvt, entry) {
-            at_hangup_immediately(cpvt, AST_CAUSE_NORMAL_UNSPECIFIED);
-            CPVT_RESET_FLAG(cpvt, CALL_FLAG_NEED_HANGUP);
-            cpvt_change_state(cpvt, CALL_STATE_RELEASED, AST_CAUSE_NORMAL_UNSPECIFIED);
-        }
+        AST_LIST_TRAVERSE_SAFE_BEGIN(&(pvt->chans), cpvt, entry)
+            {
+                at_hangup_immediately(cpvt, AST_CAUSE_NORMAL_UNSPECIFIED);
+                CPVT_RESET_FLAG(cpvt, CALL_FLAG_NEED_HANGUP);
+                cpvt_change_state(cpvt, CALL_STATE_RELEASED, AST_CAUSE_NORMAL_UNSPECIFIED);
+            }
+        AST_LIST_TRAVERSE_SAFE_END;
     }
 
     if (pvt->initialized) {
@@ -128,10 +123,6 @@ void pvt_disconnect(struct pvt* pvt)
 
     if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
         if (pvt->icard) {
-            const int err = snd_pcm_unlink(pvt->icard);
-            if (err < 0) {
-                ast_log(LOG_WARNING, "[%s][ALSA] Couldn't unlink devices: %s", PVT_ID(pvt), snd_strerror(err));
-            }
             pcm_close(CONF_UNIQ(pvt, alsadev), &pvt->icard, SND_PCM_STREAM_CAPTURE);
         }
         if (pvt->ocard) {

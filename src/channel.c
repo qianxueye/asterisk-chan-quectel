@@ -503,44 +503,44 @@ static struct ast_frame* channel_read_tty(struct cpvt* cpvt, struct pvt* pvt, si
     return cpvt_prepare_voice_frame(cpvt, buf, res / 2, fmt);
 }
 
+static int channel_start_capture(struct cpvt* cpvt, struct pvt* pvt)
+{
+    int res = pcm_start_capture(pvt->icard);
+    if (res == -EINTR || res == -EAGAIN) {
+        res = pcm_start_capture(pvt->icard);
+    }
+    if (res < 0) {
+        ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Start/recovery failed: %s\n", PVT_ID(pvt), snd_strerror(res));
+        /* Failed prepare/start can leave PREPARED with no future poll event.
+         * End the unusable call instead of reporting successful recovery. */
+        cpvt_call_disactivate(cpvt);
+        channel_enqueue_hangup(cpvt->channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
+    }
+    return res;
+}
+
 static struct ast_frame* channel_read_uac(struct cpvt* cpvt, struct pvt* pvt, size_t frames, const struct ast_format* const fmt)
 {
+    const size_t requested_frames = frames;
     pcm_show_state(6, "CAPTURE", PVT_ID(pvt), pvt->icard);
 
-    const snd_pcm_state_t state = snd_pcm_state(pvt->icard);
-    switch (state) {
-        case SND_PCM_STATE_XRUN: {
-            const int res = snd_pcm_prepare(pvt->ocard);
-            if (res) {
-                ast_log(LOG_ERROR, "[%s][ALSA][PLAYBACK] Prepare failed - err:'%s'\n", PVT_ID(pvt), snd_strerror(res));
-            }
-        }
-
-        case SND_PCM_STATE_SETUP: {
-            const int res = snd_pcm_prepare(pvt->icard);
-            if (res) {
-                ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Prepare failed - state:%s err:'%s'\n", PVT_ID(pvt), snd_pcm_state_name(state), snd_strerror(res));
-            }
-
-            return NULL;
-        }
-
-        case SND_PCM_STATE_PREPARED:
-        case SND_PCM_STATE_RUNNING:
-            break;
-
-        default:
-            ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Device state: %s\n", PVT_ID(pvt), snd_pcm_state_name(state));
-            return NULL;
+    if (channel_start_capture(cpvt, pvt) < 0) {
+        return NULL;
     }
 
     const snd_pcm_sframes_t avail_frames = snd_pcm_avail_update(pvt->icard);
     if (avail_frames < 0) {
-        ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Cannot determine available samples: %s\n", PVT_ID(pvt), snd_strerror((int)avail_frames));
+        if (avail_frames == -EPIPE || avail_frames == -ESTRPIPE) {
+            channel_start_capture(cpvt, pvt);
+        } else if (avail_frames != -EAGAIN && avail_frames != -EINTR) {
+            ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Cannot determine available samples: %s\n", PVT_ID(pvt), snd_strerror((int)avail_frames));
+        }
         return NULL;
-    } else if (frames > (size_t)avail_frames) {
-        ast_log(LOG_WARNING, "[%s][ALSA][CAPTURE] Not enough samples: %d/%d\n", PVT_ID(pvt), (int)avail_frames, (int)frames);
+    } else if (!avail_frames) {
         return NULL;
+    }
+    if (frames > (size_t)avail_frames) {
+        frames = avail_frames;
     }
 
     void* const buf = cpvt_get_buffer(cpvt);
@@ -548,29 +548,30 @@ static struct ast_frame* channel_read_uac(struct cpvt* cpvt, struct pvt* pvt, si
 
     switch (res) {
         case -EAGAIN:
-            ast_log(LOG_WARNING, "[%s][ALSA][CAPTURE] Error - try again later\n", PVT_ID(pvt));
+        case -EINTR:
             break;
 
         case -EPIPE:
         case -ESTRPIPE:
+            channel_start_capture(cpvt, pvt);
             break;
 
         default:
             if (res > 0) {
                 if (CPVT_IS_MASTER(cpvt)) {
                     if (CPVT_TEST_FLAG(cpvt, CALL_FLAG_MULTIPARTY)) {
-                        write_conference(pvt, buf, res);
+                        write_conference(pvt, buf, res * sizeof(int16_t));
                     }
 
                     PVT_STAT(pvt, a_read_bytes) += res * sizeof(int16_t);
                     PVT_STAT(pvt, read_frames)++;
-                    if (res < frames) {
+                    if ((size_t)res < requested_frames) {
                         PVT_STAT(pvt, read_sframes)++;
                     }
                 }
 
-                if (res < frames) {
-                    ast_log(LOG_WARNING, "[%s][ALSA][CAPTURE] Short frame: %d/%d\n", PVT_ID(pvt), res, (int)frames);
+                if ((size_t)res < requested_frames) {
+                    ast_debug(3, "[%s][ALSA][CAPTURE] Short frame: %d/%d\n", PVT_ID(pvt), res, (int)requested_frames);
                 }
 
                 return cpvt_prepare_voice_frame(cpvt, buf, res, fmt);
@@ -622,7 +623,10 @@ static struct ast_frame* channel_read(struct ast_channel* channel)
         goto f_ret;
     }
 
-    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE && CPVT_IS_MASTER(cpvt)) {
+    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE && !CPVT_IS_MASTER(cpvt)) {
+        return &ast_null_frame;
+    }
+    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
         f = channel_read_uac(cpvt, pvt, frame_size / sizeof(int16_t), fmt);
     } else {
         f = channel_read_tty(cpvt, pvt, frame_size, fmt);
@@ -630,6 +634,11 @@ static struct ast_frame* channel_read(struct ast_channel* channel)
 
 f_ret:
     if (f == NULL || f->frametype == AST_FRAME_NULL) {
+        /* A spurious readiness notification or transient PCM error produced
+         * no samples. Do not invent another packet's worth of UAC silence. */
+        if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
+            return &ast_null_frame;
+        }
         const int fd = ast_channel_fd(channel, 0);
         ast_debug(5, "[%s] Read - idx:%d state:%s audio:%d:%d - returning SILENCE frame\n", PVT_ID(pvt), cpvt->call_idx, call_state2str(cpvt->state), fd,
                   pvt->audio_fd);
@@ -722,74 +731,65 @@ static int channel_write_tty(struct ast_channel* channel, struct ast_frame* f, s
 static int channel_write_uac(struct ast_channel* attribute_unused(channel), struct ast_frame* f, struct cpvt* attribute_unused cpvt, struct pvt* pvt)
 {
     const int samples = f->samples;
-    int res           = 0;
+    int written       = 0;
+    int recovered     = 0;
+    int res           = pcm_prepare_playback(pvt->ocard);
+
+    if (res < 0) {
+        goto w_finish;
+    }
+    if (samples <= 0) {
+        return 0;
+    }
 
     pcm_show_state(6, "PLAYBACK", PVT_ID(pvt), pvt->ocard);
-
-    const snd_pcm_state_t state = snd_pcm_state(pvt->ocard);
-    switch (state) {
-        case SND_PCM_STATE_XRUN: {
-            res = snd_pcm_prepare(pvt->icard);
-            if (res) {
-                ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Prepare failed - err:'%s'\n", PVT_ID(pvt), snd_strerror(res));
-                goto w_finish;
-            }
-        }
-        case SND_PCM_STATE_SETUP:
-            res = snd_pcm_prepare(pvt->ocard);
-            if (res) {
-                ast_log(LOG_ERROR, "[%s][ALSA][PLAYBACK] Prepare failed - state:%s err:'%s'\n", PVT_ID(pvt), snd_pcm_state_name(state), snd_strerror(res));
-                goto w_finish;
-            }
-            break;
-
-        case SND_PCM_STATE_PREPARED:
-        case SND_PCM_STATE_RUNNING:
-            break;
-
-        default:
-            ast_log(LOG_ERROR, "[%s][ALSA][PLAYBACK] Device state: %s\n", PVT_ID(pvt), snd_pcm_state_name(state));
-            res = -1;
-            goto w_finish;
-    }
-
     ast_frame_byteswap_le(f);
-    if (pvt->ocard_channels == 1u) {
-        res = snd_pcm_mmap_writei(pvt->ocard, f->data.ptr, samples);
-    } else {
-        void* d[pvt->ocard_channels];
-        for (unsigned int i = 0; i < pvt->ocard_channels; ++i) {
-            d[i] = f->data.ptr;
-        }
-        res = snd_pcm_mmap_writen(pvt->ocard, (void**)&d, samples);
-    }
 
-    switch (res) {
-        case -EAGAIN:
-            ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Error - try again later\n", PVT_ID(pvt));
-            res = 0;
-            break;
-
-        case -EPIPE:
-        case -ESTRPIPE:
-            res = 0;
-            break;
-
-        default:
-            if (res >= 0) {
-                PVT_STAT(pvt, write_frames)  += 1;
-                PVT_STAT(pvt, a_write_bytes) += res * sizeof(int16_t);
-                if (res != samples) {
-                    PVT_STAT(pvt, write_tframes)++;
-                    ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Write: %d/%d\n", PVT_ID(pvt), res, samples);
-                }
+    /* ALSA is nonblocking. Make progress on short writes without resending the
+     * prefix, and bound retries so a stalled device cannot block the bridge. */
+    for (unsigned int attempt = 0; written < samples && attempt < 8u; ++attempt) {
+        void* const data = (int16_t*)f->data.ptr + written;
+        if (pvt->ocard_channels == 1u) {
+            res = snd_pcm_mmap_writei(pvt->ocard, data, samples - written);
+        } else {
+            void* d[pvt->ocard_channels];
+            for (unsigned int i = 0; i < pvt->ocard_channels; ++i) {
+                d[i] = data;
             }
-            break;
+            res = snd_pcm_mmap_writen(pvt->ocard, d, samples - written);
+        }
+
+        if (res > 0) {
+            written += res;
+            continue;
+        }
+        if (res == -EINTR) {
+            continue;
+        }
+        if (!recovered && (res == -EPIPE || res == -ESTRPIPE)) {
+            recovered = 1;
+            res       = pcm_prepare_playback(pvt->ocard);
+            if (!res) {
+                continue;
+            }
+        }
+        break;
     }
 
 w_finish:
-
-    return res;
+    if (written > 0) {
+        PVT_STAT(pvt, write_frames)++;
+        PVT_STAT(pvt, a_write_bytes) += written * sizeof(int16_t);
+    }
+    if (written < samples) {
+        PVT_STAT(pvt, write_tframes)++;
+        ast_debug(3, "[%s][ALSA][PLAYBACK] Incomplete frame: %d/%d samples, err:%d\n", PVT_ID(pvt), written, samples, res);
+    }
+    if (res < 0 && res != -EAGAIN && res != -EINTR && res != -EPIPE && res != -ESTRPIPE) {
+        ast_log(LOG_ERROR, "[%s][ALSA][PLAYBACK] Write failed: %s\n", PVT_ID(pvt), snd_strerror(res));
+        return res;
+    }
+    return 0;
 }
 
 #/* */
@@ -830,7 +830,10 @@ static int channel_write(struct ast_channel* channel, struct ast_frame* f)
         ast_debug(8, "[%s] Large voice frame: %d/%d, samples: %d\n", PVT_ID(pvt), f->datalen, (int)frame_size, f->samples);
     }
 
-    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE && CPVT_IS_MASTER(cpvt)) {
+    if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
+        if (!CPVT_IS_MASTER(cpvt)) {
+            return 0;
+        }
         res = channel_write_uac(channel, f, cpvt, pvt);
     } else {
         res = channel_write_tty(channel, f, cpvt, pvt);
@@ -1016,7 +1019,9 @@ struct ast_channel* channel_new(struct pvt* pvt, int ast_state, const char* cid_
         ast_channel_set_readformat(channel, fmt);
     }
 
-    ast_channel_set_fd(channel, 0, pvt->audio_fd);
+    /* UAC capture belongs to the activated master only. Waiting/initializing
+     * channels must not poll a descriptor another channel is consuming. */
+    ast_channel_set_fd(channel, 0, CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE ? -1 : pvt->audio_fd);
     if (pvt->a_timer) {
         ast_channel_set_fd(channel, 1, ast_timer_fd(pvt->a_timer));
         ast_timer_set_rate(pvt->a_timer, 50);

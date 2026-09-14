@@ -1,12 +1,14 @@
 /*
    Copyright (C) 2010,2011 bg <bg_one@mail.ru>
 */
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 
 #include "ast_config.h"
 
 #include <asterisk/causes.h>
+#include <asterisk/timing.h>
 #include <asterisk/utils.h>
 
 #include "cpvt.h"
@@ -126,13 +128,13 @@ void cpvt_free(struct cpvt* cpvt)
     ast_debug(3, "[%s] Destroy cpvt - idx:%d dir:%d state:%s flags:%d channel:%s\n", PVT_ID(pvt), cpvt->call_idx, CPVT_DIRECTION(cpvt),
               call_state2str(cpvt->state), cpvt->flags, cpvt->channel ? "attached" : "detached");
 
+    decrease_chan_counters(cpvt, pvt);
+    relink_to_sys_chan(cpvt, pvt);
+
     if (PVT_NO_CHANS(pvt)) {
         pvt_on_remove_last_channel(pvt);
         pvt_try_restate(pvt);
     }
-
-    decrease_chan_counters(cpvt, pvt);
-    relink_to_sys_chan(cpvt, pvt);
 
     ast_free(cpvt->buffer);
 
@@ -140,6 +142,22 @@ void cpvt_free(struct cpvt* cpvt)
     close(cpvt->rd_pipe[0]);
 
     ast_free(cpvt);
+}
+
+static void cpvt_stop_uac(struct pvt* const pvt)
+{
+    if (pvt->icard) {
+        const int res = snd_pcm_drop(pvt->icard);
+        if (res < 0) {
+            ast_debug(2, "[%s][ALSA][CAPTURE] Stop failed: %s\n", PVT_ID(pvt), snd_strerror(res));
+        }
+    }
+    if (pvt->ocard) {
+        const int res = snd_pcm_drop(pvt->ocard);
+        if (res < 0) {
+            ast_debug(2, "[%s][ALSA][PLAYBACK] Stop failed: %s\n", PVT_ID(pvt), snd_strerror(res));
+        }
+    }
 }
 
 void cpvt_call_disactivate(struct cpvt* const cpvt)
@@ -151,8 +169,15 @@ void cpvt_call_disactivate(struct cpvt* const cpvt)
     struct pvt* const pvt = cpvt->pvt;
 
     if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
-        // snd_pcm_drop(pvt->icard);
-        // snd_pcm_drop(pvt->ocard);
+        /* A late HOLD/RELEASE for the previous master must not stop the new
+         * call's audio after call waiting has switched the sound source. */
+        if (CPVT_IS_MASTER(cpvt)) {
+            cpvt_stop_uac(pvt);
+        }
+        if (cpvt->channel) {
+            ast_channel_set_fd(cpvt->channel, 0, -1);
+            ast_channel_set_fd(cpvt->channel, 1, -1);
+        }
     } else {
         if (CONF_SHARED(pvt, multiparty)) {
             mixb_detach(&pvt->write_mixb, &cpvt->mixstream);
@@ -163,24 +188,27 @@ void cpvt_call_disactivate(struct cpvt* const cpvt)
     ast_debug(6, "[%s] Call idx:%d disactivated\n", PVT_ID(pvt), cpvt->call_idx);
 }
 
-void cpvt_call_activate(struct cpvt* const cpvt)
+int cpvt_call_activate(struct cpvt* const cpvt)
 {
     struct cpvt* cpvt2;
 
     /* nothing todo, already main */
-    if (CPVT_IS_MASTER(cpvt)) {
-        return;
+    if (CPVT_IS_MASTER(cpvt) || CPVT_IS_LOCAL(cpvt)) {
+        return 0;
     }
 
     /* drop any other from MASTER, any set pipe for actives */
     struct pvt* const pvt = cpvt->pvt;
+    const int uac         = CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE;
+    int replacing_master  = 0;
 
     AST_LIST_TRAVERSE(&pvt->chans, cpvt2, entry) {
         if (cpvt2 == cpvt) {
             continue;
         }
 
-        if (CPVT_IS_MASTER(cpvt)) {
+        if (CPVT_IS_MASTER(cpvt2)) {
+            replacing_master = 1;
             ast_debug(6, "[%s] Call idx:%d gave master\n", PVT_ID(pvt), cpvt2->call_idx);
         }
 
@@ -191,7 +219,13 @@ void cpvt_call_activate(struct cpvt* const cpvt)
         }
 
         ast_channel_set_fd(cpvt2->channel, 1, -1);
-        if (!CPVT_TEST_FLAG(cpvt, CALL_FLAG_ACTIVATED)) {
+        if (uac) {
+            /* UAC has one sound source; inactive channels must not poll the
+             * master's PCM descriptor or fall back to serial audio reads. */
+            ast_channel_set_fd(cpvt2->channel, 0, -1);
+            continue;
+        }
+        if (!CPVT_TEST_FLAG(cpvt2, CALL_FLAG_ACTIVATED)) {
             continue;
         }
 
@@ -202,15 +236,44 @@ void cpvt_call_activate(struct cpvt* const cpvt)
     /* setup call local write possition */
     if (!CPVT_TEST_FLAG(cpvt, CALL_FLAG_ACTIVATED)) {
         // FIXME: reset possition?
-        if (CONF_SHARED(pvt, multiparty)) {
+        if (!uac && CONF_SHARED(pvt, multiparty)) {
             mixb_attach(&pvt->write_mixb, &cpvt->mixstream);
         }
     }
 
     if (pvt->audio_fd >= 0) {
+        if (uac) {
+            if (replacing_master) {
+                cpvt_stop_uac(pvt);
+            }
+            /* Start before Asterisk polls: a PREPARED capture with no samples
+             * will not make its descriptor readable by itself. */
+            int res = pcm_start_capture(pvt->icard);
+            if (res == -EINTR || res == -EAGAIN) {
+                res = pcm_start_capture(pvt->icard);
+            }
+            if (res < 0) {
+                ast_log(LOG_ERROR, "[%s][ALSA][CAPTURE] Start failed: %s\n", PVT_ID(pvt), snd_strerror(res));
+                /* PREPARED capture has no readiness event to trigger another
+                 * retry. Fail the call explicitly instead of leaving a
+                 * channel that reports success but cannot receive audio. */
+                if (cpvt->channel) {
+                    ast_channel_set_fd(cpvt->channel, 0, -1);
+                    ast_channel_set_fd(cpvt->channel, 1, -1);
+                    channel_enqueue_hangup(cpvt->channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
+                }
+                CPVT_RESET_FLAGS(cpvt, CALL_FLAG_ACTIVATED | CALL_FLAG_MASTER);
+                return -1;
+            }
+        }
+        if (cpvt->channel) {
+            ast_channel_set_fd(cpvt->channel, 0, pvt->audio_fd);
+            ast_channel_set_fd(cpvt->channel, 1, pvt->a_timer ? ast_timer_fd(pvt->a_timer) : -1);
+        }
         CPVT_SET_FLAGS(cpvt, CALL_FLAG_ACTIVATED | CALL_FLAG_MASTER);
         ast_debug(6, "[%s] Call idx:%d was master\n", PVT_ID(pvt), cpvt->call_idx);
     }
+    return 0;
 }
 
 /* NOTE: bg: hmm ast_queue_control() say no need channel lock, trylock got deadlock up to 30 seconds here */
@@ -286,23 +349,31 @@ static void change_state(struct cpvt* const cpvt, struct pvt* const pvt, struct 
     switch (newstate) {
         case CALL_STATE_DIALING:
             /* from ^ORIG:idx,y */
-            cpvt_call_activate(cpvt);
+            if (cpvt_call_activate(cpvt)) {
+                break;
+            }
             cpvt_control(cpvt, AST_CONTROL_PROGRESS);
             ast_setstate(channel, AST_STATE_DIALING);
             break;
 
         case CALL_STATE_ALERTING:
-            cpvt_call_activate(cpvt);
+            if (cpvt_call_activate(cpvt)) {
+                break;
+            }
             cpvt_control(cpvt, AST_CONTROL_RINGING);
             ast_setstate(channel, AST_STATE_RINGING);
             break;
 
         case CALL_STATE_INCOMING:
-            cpvt_call_activate(cpvt);
+            if (cpvt_call_activate(cpvt)) {
+                break;
+            }
             break;
 
         case CALL_STATE_ACTIVE:
-            cpvt_call_activate(cpvt);
+            if (cpvt_call_activate(cpvt)) {
+                break;
+            }
             if (oldstate == CALL_STATE_ONHOLD) {
                 ast_debug(1, "[%s] Unhold call idx:%d\n", PVT_ID(pvt), call_idx);
                 cpvt_control(cpvt, AST_CONTROL_UNHOLD);

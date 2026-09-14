@@ -323,6 +323,7 @@ int at_enqueue_initialization_quectel(struct cpvt* cpvt, unsigned int dsci)
     };
 
     DECLARE_AT_CMD(cereg_init, "+CEREG=2");
+    DECLARE_AT_CMD(cereg_query, "+CEREG?");
 
     struct pvt* const pvt   = cpvt->pvt;
     const unsigned int dtmf = CONF_SHARED(pvt, dtmf);
@@ -338,6 +339,8 @@ int at_enqueue_initialization_quectel(struct cpvt* cpvt, unsigned int dsci)
         ATQ_CMD_DECLARE_ST(CMD_AT_QINDCFG_RING, qindcfg_ring),
         tonedet_cmds[dtmf ? 1 : 0],
         ATQ_CMD_DECLARE_ST(CMD_AT_CEREG_INIT, cereg_init),
+        /* This task follows common initialization, including its CREG query. */
+        ATQ_CMD_DECLARE_STI(CMD_AT_CEREG, cereg_query),
         ATQ_CMD_DECLARE_ST(CMD_AT_FINAL, at),
     };
 

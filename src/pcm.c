@@ -64,26 +64,13 @@ static snd_pcm_uframes_t adjust_start_threshold(snd_pcm_uframes_t ptime)
     static const size_t PTIME_MAX_START_THRESHOLD = 250u;
 
     if (ptime < PTIME_MIN_START_THRESHOLD) {
-        return PTIME_MAX_START_THRESHOLD;
+        return PTIME_MIN_START_THRESHOLD;
     }
-    if (ptime > PTIME_MIN_START_THRESHOLD) {
+    if (ptime > PTIME_MAX_START_THRESHOLD) {
         return PTIME_MAX_START_THRESHOLD;
     }
 
     return ptime;
-}
-
-static unsigned int hw_params_get_rate(const snd_pcm_hw_params_t* const params)
-{
-    static const unsigned int UNKNOWN_RATE = 0xffff;
-
-    unsigned int rate;
-    const int res = snd_pcm_hw_params_get_rate(params, &rate, NULL);
-    if (res >= 0) {
-        return rate;
-    } else {
-        return UNKNOWN_RATE;
-    }
 }
 
 int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* const fmt, snd_pcm_t** pcm, unsigned int* pcm_channels, int* fd)
@@ -99,13 +86,11 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
 #else
     const size_t ptime = (stream == SND_PCM_STREAM_CAPTURE) ? PTIME_CAPTURE : PTIME_PLAYBACK;
 #endif
-    snd_pcm_uframes_t period_size     = adjust_uframes(ptime, rate);
-    snd_pcm_uframes_t buffer_size     = adjust_uframes(PTIME_BUFFER, rate);
-    snd_pcm_uframes_t start_threshold = adjust_uframes(adjust_start_threshold(ptime * 2), rate);
-    snd_pcm_uframes_t stop_threshold  = buffer_size - period_size;
-    snd_pcm_uframes_t boundary        = 0u;
-    unsigned int hwrate               = rate;
-    unsigned int channels             = 1;
+    snd_pcm_uframes_t period_size = adjust_uframes(ptime, rate);
+    snd_pcm_uframes_t buffer_size = adjust_uframes(PTIME_BUFFER, rate);
+    snd_pcm_uframes_t boundary    = 0u;
+    unsigned int hwrate           = rate;
+    unsigned int channels         = 1;
 
     const char* const stream_str = (stream == SND_PCM_STREAM_CAPTURE) ? "CAPTURE" : "PLAYBACK";
 
@@ -119,7 +104,11 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
 
     hwparams = ast_alloca(snd_pcm_hw_params_sizeof());
     memset(hwparams, 0, snd_pcm_hw_params_sizeof());
-    snd_pcm_hw_params_any(handle, hwparams);
+    res = snd_pcm_hw_params_any(handle, hwparams);
+    if (res < 0) {
+        ast_log(LOG_ERROR, "[ALSA][%s] Couldn't initialize HW params: %s\n", stream_str, snd_strerror(res));
+        goto alsa_fail;
+    }
 
     res = snd_pcm_hw_params_set_access(handle, hwparams, SND_PCM_ACCESS_MMAP_INTERLEAVED);
     if (res < 0) {
@@ -140,8 +129,8 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
     }
 
     res = snd_pcm_hw_params_set_rate(handle, hwparams, hwrate, 0);
-    if (hwrate != rate) {
-        ast_log(LOG_WARNING, "[ALSA][%s] HW Rate not correct -  requested:%d got:%u\n", stream_str, rate, hwrate);
+    if (res < 0) {
+        ast_log(LOG_ERROR, "[ALSA][%s] Couldn't set HW rate %u: %s\n", stream_str, rate, snd_strerror(res));
         goto alsa_fail;
     }
 
@@ -172,28 +161,56 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
     res = snd_pcm_hw_params_get_channels(hwparams, &channels);
     if (res >= 0) {
         const unsigned int max_channels = (stream == SND_PCM_STREAM_CAPTURE) ? 1 : 2;
-        if (channels > max_channels) {
-            ast_log(LOG_ERROR, "[ALSA][%s] Too many channels: %u (max %u are supported)\n", stream_str, channels, max_channels);
+        if (!channels || channels > max_channels) {
+            ast_log(LOG_ERROR, "[ALSA][%s] Unsupported channels: %u (1 to %u are supported)\n", stream_str, channels, max_channels);
+            res = -EINVAL;
             goto alsa_fail;
         }
-        *pcm_channels = channels;
         ast_debug(1, "[ALSA][%s] Channels: %u\n", stream_str, channels);
     } else {
         ast_log(LOG_ERROR, "[ALSA][%s] Couldn't get channel count: %s\n", stream_str, snd_strerror(res));
         goto alsa_fail;
     }
 
-    ast_debug(1, "[ALSA][%s] Rate: %u\n", stream_str, hw_params_get_rate(hwparams));
+    res = snd_pcm_hw_params_get_rate(hwparams, &hwrate, NULL);
+    if (res < 0) {
+        ast_log(LOG_ERROR, "[ALSA][%s] Couldn't get HW rate: %s\n", stream_str, snd_strerror(res));
+        goto alsa_fail;
+    }
+    if (hwrate != rate) {
+        ast_log(LOG_ERROR, "[ALSA][%s] HW Rate not correct - requested:%u got:%u\n", stream_str, rate, hwrate);
+        res = -EINVAL;
+        goto alsa_fail;
+    }
+    ast_debug(1, "[ALSA][%s] Rate: %u\n", stream_str, hwrate);
 
     res = snd_pcm_hw_params_get_period_size(hwparams, &period_size, NULL);
-    if (res >= 0) {
-        ast_debug(1, "[ALSA][%s] Period size: %lu\n", stream_str, period_size);
+    if (res < 0) {
+        ast_log(LOG_ERROR, "[ALSA][%s] Couldn't get period size: %s\n", stream_str, snd_strerror(res));
+        goto alsa_fail;
     }
+    ast_debug(1, "[ALSA][%s] Period size: %lu\n", stream_str, period_size);
 
     res = snd_pcm_hw_params_get_buffer_size(hwparams, &buffer_size);
-    if (res >= 0) {
-        ast_debug(1, "[ALSA][%s] Buffer size: %lu\n", stream_str, buffer_size);
+    if (res < 0) {
+        ast_log(LOG_ERROR, "[ALSA][%s] Couldn't get buffer size: %s\n", stream_str, snd_strerror(res));
+        goto alsa_fail;
     }
+    ast_debug(1, "[ALSA][%s] Buffer size: %lu\n", stream_str, buffer_size);
+    if (!period_size || period_size > buffer_size) {
+        ast_log(LOG_ERROR, "[ALSA][%s] Invalid period/buffer sizes: %lu/%lu\n", stream_str, period_size, buffer_size);
+        res = -EINVAL;
+        goto alsa_fail;
+    }
+
+    snd_pcm_uframes_t start_threshold = adjust_uframes(adjust_start_threshold(ptime * 2), rate);
+    if (start_threshold < period_size) {
+        start_threshold = period_size;
+    }
+    if (start_threshold > buffer_size) {
+        start_threshold = buffer_size;
+    }
+    const snd_pcm_uframes_t stop_threshold = buffer_size > period_size ? buffer_size - period_size : buffer_size;
 
     swparams = ast_alloca(snd_pcm_sw_params_sizeof());
     memset(swparams, 0, snd_pcm_sw_params_sizeof());
@@ -248,6 +265,9 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
     if (stream == SND_PCM_STREAM_CAPTURE) {
         res = snd_pcm_poll_descriptors_count(handle);
         if (res <= 0) {
+            if (!res) {
+                res = -EINVAL;
+            }
             ast_log(LOG_ERROR, "[ALSA][%s] Unable to get a poll descriptors count: %s\n", stream_str, snd_strerror(res));
             goto alsa_fail;
         }
@@ -255,7 +275,10 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
         struct pollfd pfd[res];
 
         res = snd_pcm_poll_descriptors(handle, pfd, res);
-        if (res < 0) {
+        if (res <= 0) {
+            if (!res) {
+                res = -EINVAL;
+            }
             ast_log(LOG_ERROR, "[ALSA][%s] Unable to get a poll descriptor(s): %s\n", stream_str, snd_strerror(res));
             goto alsa_fail;
         }
@@ -265,13 +288,51 @@ int pcm_init(const char* dev, snd_pcm_stream_t stream, const struct ast_format* 
         }
     }
 
-    *pcm = handle;
+    *pcm_channels = channels;
+    *pcm          = handle;
     return 0;
 
 alsa_fail:
     snd_pcm_close(handle);
-    return res;
+    return res < 0 ? res : -EINVAL;
 }
+
+static int pcm_prepare_stream(snd_pcm_t* const pcm)
+{
+    if (!pcm) {
+        return -ENODEV;
+    }
+
+    switch (snd_pcm_state(pcm)) {
+        case SND_PCM_STATE_RUNNING:
+        case SND_PCM_STATE_PREPARED:
+            return 0;
+
+        case SND_PCM_STATE_SETUP:
+        case SND_PCM_STATE_XRUN:
+        case SND_PCM_STATE_SUSPENDED:
+            /* Prepare is a bounded suspend fallback; snd_pcm_recover can wait indefinitely. */
+            return snd_pcm_prepare(pcm);
+
+        case SND_PCM_STATE_DISCONNECTED:
+            return -ENODEV;
+
+        default:
+            return -EBADFD;
+    }
+}
+
+int pcm_start_capture(snd_pcm_t* const pcm)
+{
+    const int res = pcm_prepare_stream(pcm);
+    if (res < 0) {
+        return res;
+    }
+
+    return snd_pcm_state(pcm) == SND_PCM_STATE_PREPARED ? snd_pcm_start(pcm) : 0;
+}
+
+int pcm_prepare_playback(snd_pcm_t* const pcm) { return pcm_prepare_stream(pcm); }
 
 int pcm_close(const char* dev, snd_pcm_t** ad, snd_pcm_stream_t stream_type)
 {
