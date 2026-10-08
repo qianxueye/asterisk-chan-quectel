@@ -38,6 +38,40 @@
 #define ESTRPIPE EPIPE
 #endif
 
+/* The channel lock may be released while waiting. Keep no call or device
+ * pointer across that wait: modem release can free both. */
+static struct pvt* channel_lock_pvt(struct ast_channel* channel, struct cpvt** call)
+{
+    *call = NULL;
+    for (;;) {
+        int busy = 0;
+        if (!AST_RWLIST_TRYRDLOCK(&gpublic->devices)) {
+            struct pvt* pvt;
+            AST_RWLIST_TRAVERSE(&gpublic->devices, pvt, entry) {
+                if (ast_mutex_trylock(&pvt->lock)) {
+                    busy = 1;
+                    continue;
+                }
+
+                struct cpvt* cpvt;
+                AST_LIST_TRAVERSE(&pvt->chans, cpvt, entry) {
+                    if (cpvt->channel == channel && ast_channel_tech_pvt(channel) == cpvt) {
+                        *call = cpvt;
+                        AST_RWLIST_UNLOCK(&gpublic->devices);
+                        return pvt;
+                    }
+                }
+                ast_mutex_unlock(&pvt->lock);
+            }
+            AST_RWLIST_UNLOCK(&gpublic->devices);
+            if (!busy) {
+                return NULL;
+            }
+        }
+        CHANNEL_DEADLOCK_AVOIDANCE(channel);
+    }
+}
+
 static int setvar_helper(const struct pvt* const pvt, struct ast_channel* chan, const char* name, const char* value)
 {
     if (ast_strlen_zero(name) || ast_strlen_zero(value)) {
@@ -588,15 +622,13 @@ static struct ast_frame* channel_read_uac(struct cpvt* cpvt, struct pvt* pvt, si
 
 static struct ast_frame* channel_read(struct ast_channel* channel)
 {
-    struct cpvt* const cpvt = ast_channel_tech_pvt(channel);
-    struct ast_frame* f     = NULL;
+    struct cpvt* cpvt = NULL;
+    RAII_VAR(struct pvt* const, pvt, channel_lock_pvt(channel, &cpvt), pvt_unlock);
+    struct ast_frame* f = NULL;
 
-    if (!cpvt || cpvt->channel != channel || !cpvt->pvt || CPVT_IS_LOCAL(cpvt)) {
+    if (!pvt || CPVT_IS_LOCAL(cpvt)) {
         return &ast_null_frame;
     }
-
-    struct pvt* const pvt = cpvt->pvt;
-    SCOPED_CPVT_TL(cpvt_lock, cpvt);
 
     ast_debug(8, "[%s] Read - idx:%d state:%s audio_fd:%d\n", PVT_ID(pvt), cpvt->call_idx, call_state2str(cpvt->state), pvt->audio_fd);
 
@@ -796,10 +828,11 @@ w_finish:
 
 static int channel_write(struct ast_channel* channel, struct ast_frame* f)
 {
-    struct cpvt* const cpvt = ast_channel_tech_pvt(channel);
-    int res                 = -1;
+    struct cpvt* cpvt = NULL;
+    RAII_VAR(struct pvt* const, pvt, channel_lock_pvt(channel, &cpvt), pvt_unlock);
+    int res = -1;
 
-    if (!cpvt || cpvt->channel != channel || !cpvt->pvt || CPVT_IS_LOCAL(cpvt)) {
+    if (!pvt || CPVT_IS_LOCAL(cpvt)) {
         return 0;
     }
 
@@ -809,9 +842,6 @@ static int channel_write(struct ast_channel* channel, struct ast_frame* f)
     if (CPVT_TEST_FLAG(cpvt, CALL_FLAG_BRIDGE_LOOP)) {
         return 0;
     }
-
-    struct pvt* const pvt = cpvt->pvt;
-    SCOPED_CPVT_TL(cpvt_lock, cpvt);
 
     const struct ast_format* const fmt = pvt_get_audio_format(pvt);
     const size_t frame_size            = pvt_get_audio_frame_size(PTIME_PLAYBACK, fmt);
@@ -1151,16 +1181,16 @@ void channel_start_local_json(struct pvt* pvt, const char* exten, const char* nu
 
 static int channel_func_read(struct ast_channel* channel, attribute_unused const char* function, char* data, char* buf, size_t len)
 {
-    struct cpvt* const cpvt = ast_channel_tech_pvt(channel);
-    int ret                 = 0;
+    struct cpvt* cpvt = NULL;
+    RAII_VAR(struct pvt* const, pvt, channel_lock_pvt(channel, &cpvt), pvt_unlock);
+    int ret = 0;
 
-    if (!cpvt || !cpvt->pvt) {
+    if (!pvt) {
         ast_log(LOG_WARNING, "call on unreferenced %s\n", ast_channel_name(channel));
         return -1;
     }
 
     if (!strcasecmp(data, "callstate")) {
-        SCOPED_CPVT_TL(cpvt_lock, cpvt);
         call_state_t state = cpvt->state;
         ast_copy_string(buf, call_state2str(state), len);
     } else {
@@ -1174,11 +1204,12 @@ static int channel_func_read(struct ast_channel* channel, attribute_unused const
 
 static int channel_func_write(struct ast_channel* channel, const char* function, char* data, const char* value)
 {
-    struct cpvt* const cpvt = ast_channel_tech_pvt(channel);
+    struct cpvt* cpvt = NULL;
+    RAII_VAR(struct pvt* const, pvt, channel_lock_pvt(channel, &cpvt), pvt_unlock);
     call_state_t newstate, oldstate;
     int ret = 0;
 
-    if (!cpvt || !cpvt->pvt) {
+    if (!pvt) {
         ast_log(LOG_WARNING, "call on unreferenced %s\n", ast_channel_name(channel));
         return -1;
     }
@@ -1191,7 +1222,6 @@ static int channel_func_write(struct ast_channel* channel, const char* function,
             return -1;
         }
 
-        SCOPED_CPVT_TL(cpvt_lock, cpvt);
         oldstate = cpvt->state;
 
         if (oldstate == newstate)
