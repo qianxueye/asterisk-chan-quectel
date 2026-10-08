@@ -6,6 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef CHANNEL_LOCK_REGRESSION
+#include <pthread.h>
+#endif
 
 #define attribute_unused __attribute__((unused))
 #ifndef ESTRPIPE
@@ -43,7 +46,10 @@
 #define PVT_STAT(p, f) ((p)->stat.f)
 #define PVT_NO_CHANS(p) (!(p)->chansno)
 #define PVT_ID(p) "test"
+#ifndef CHANNEL_LOCK_REGRESSION
+#define RAII_VAR(type, name, value, cleanup) type name = (value)
 #define SCOPED_CPVT_TL(name, c) ((void)(c))
+#endif
 #define AST_LIST_TRAVERSE(h, c, e) for ((c) = (h)->first; (c); (c) = (c)->next)
 #define AST_LIST_TRAVERSE_SAFE_BEGIN(h, c, e) { struct cpvt *saved_next; \
     for ((c) = (h)->first; (c) && (saved_next = (c)->next, 1); (c) = saved_next)
@@ -80,6 +86,10 @@ struct cpvt {
     struct ast_frame frame;
 };
 struct pvt {
+#ifdef CHANNEL_LOCK_REGRESSION
+    pthread_mutex_t lock;
+    struct pvt *next;
+#endif
     snd_pcm_t *icard, *ocard;
     int audio_fd, uac, multiparty, chansno;
     unsigned ocard_channels;
@@ -182,6 +192,10 @@ static void ast_channel_set_fd(struct ast_channel *channel, int index, int fd)
 static int ast_channel_fd(struct ast_channel *channel, int index) { return channel->fd[index]; }
 static int ast_channel_fdno(struct ast_channel *channel) { return channel->fdno; }
 static struct cpvt *ast_channel_tech_pvt(struct ast_channel *channel) { return channel->cpvt; }
+#ifndef CHANNEL_LOCK_REGRESSION
+static struct pvt *channel_lock_pvt(struct ast_channel *channel, struct cpvt **call)
+{ *call = channel->cpvt; return *call ? (*call)->pvt : NULL; }
+#endif
 static const struct ast_format *pvt_get_audio_format(struct pvt *pvt) { return &format; }
 static size_t pvt_get_audio_frame_size(int ptime, const struct ast_format *fmt) { return 320; }
 static int ast_format_cmp(const struct ast_format *a, const struct ast_format *b) { return AST_FORMAT_CMP_EQUAL; }
@@ -226,6 +240,10 @@ static int cpvt_change_state(struct cpvt *cpvt, int state, int cause)
     ++disconnect_releases;
     return 1;
 }
+
+#ifdef CHANNEL_LOCK_REGRESSION
+#include "channel_lock_harness.h"
+#endif
 
 /* INSERT PRODUCTION FUNCTIONS */
 
@@ -406,6 +424,7 @@ static void test_disconnect_frees_all_channels(void)
     assert(disconnect_hangups == 3 && disconnect_releases == 3);
 }
 
+#ifndef CHANNEL_LOCK_REGRESSION
 int main(void)
 {
     test_activation_and_handoff();
@@ -417,3 +436,5 @@ int main(void)
     puts("Audio lifecycle regressions: 6 scenario groups passed");
     return 0;
 }
+
+#endif
