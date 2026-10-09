@@ -75,10 +75,10 @@ static struct pvt* channel_lock_pvt(struct ast_channel* channel, struct cpvt** c
 static int setvar_helper(const struct pvt* const pvt, struct ast_channel* chan, const char* name, const char* value)
 {
     if (ast_strlen_zero(name) || ast_strlen_zero(value)) {
-        ast_debug(3, "[%s] Skipping chanvar %s = %s\n", PVT_ID(pvt), S_OR(name, "(null)"), S_OR(value, "(null)"));
+        ast_debug(3, "[%s] Skipping chanvar %s\n", PVT_ID(pvt), S_OR(name, "(null)"));
         return -1;
     }
-    ast_debug(1, "[%s] Setting chanvar %s = %s\n", PVT_ID(pvt), name, value);
+    ast_debug(1, "[%s] Setting chanvar %s\n", PVT_ID(pvt), name);
     return pbx_builtin_setvar_helper(chan, name, value);
 }
 

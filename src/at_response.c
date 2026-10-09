@@ -1651,13 +1651,16 @@ static int at_response_msg(struct pvt* const pvt, const struct ast_str* const re
             format_ast_tm(&scts, scts_str);
 
             if (udh.parts > 1) {
-                ast_verb(2, "[%s][SMS:%d PART:%d/%d TS:%s] Got message part from %s: [%s]\n", PVT_ID(pvt), (int)udh.ref, (int)udh.order, (int)udh.parts,
-                         ast_str_buffer(scts_str), ast_str_buffer(oa), ast_str_buffer(msg));
+                ast_verb(2, "[%s][SMS:%d PART:%d/%d TS:%s] Got message part from %s (content omitted)\n", PVT_ID(pvt), (int)udh.ref, (int)udh.order,
+                         (int)udh.parts, ast_str_buffer(scts_str), ast_str_buffer(oa));
                 int csms_cnt = smsdb_put(pvt->imsi, ast_str_buffer(oa), udh.ref, udh.parts, udh.order, ast_str_buffer(msg), &fullmsg);
                 if (csms_cnt <= 0) {
                     ast_log(LOG_ERROR, "[%s][SMS:%d PART:%d/%d TS:%s] Error putting message part to database\n", PVT_ID(pvt), (int)udh.ref, (int)udh.order,
                             (int)udh.parts, ast_str_buffer(scts_str));
-                    goto receive_as_is;
+                    msg_complete = 1;
+                    msg_ack      = TRIBOOL_TRUE;
+                    msg_ack_uid  = (int)udh.ref;
+                    goto msg_done;
                 }
                 ast_str_update(fullmsg);
                 msg_ack      = TRIBOOL_TRUE;
@@ -1672,12 +1675,11 @@ static int at_response_msg(struct pvt* const pvt, const struct ast_str* const re
                     goto msg_done;
                 }
             } else {
-receive_as_is:
                 msg_ack      = TRIBOOL_TRUE;
                 msg_ack_uid  = (int)udh.ref;
                 msg_complete = 1;
-                ast_verb(2, "[%s][SMS:%d TS:%s] Got message part from %s: [%s]\n", PVT_ID(pvt), (int)udh.ref, ast_str_buffer(scts_str), ast_str_buffer(oa),
-                         ast_str_buffer(msg));
+                ast_verb(2, "[%s][SMS:%d TS:%s] Got message part from %s (content omitted)\n", PVT_ID(pvt), (int)udh.ref, ast_str_buffer(scts_str),
+                         ast_str_buffer(oa));
                 ast_str_copy_string(&fullmsg, msg);
             }
 
@@ -1692,8 +1694,8 @@ receive_as_is:
             ast_json_object_set(sms, "from", ast_json_string_create(ast_str_buffer(oa)));
 
             if (ast_str_strlen(fullmsg)) {
-                ast_verb(1, "[%s][SMS:%d PARTS:%d TS:%s] Got message from %s: [%s]\n", PVT_ID(pvt), (int)udh.ref, (int)udh.parts, ast_str_buffer(scts_str),
-                         ast_str_buffer(oa), ast_str_buffer(fullmsg));
+                ast_verb(1, "[%s][SMS:%d PARTS:%d TS:%s] Got message from %s (content omitted)\n", PVT_ID(pvt), (int)udh.ref, (int)udh.parts,
+                         ast_str_buffer(scts_str), ast_str_buffer(oa));
 
                 ast_json_object_set(sms, "msg", ast_json_string_create(ast_str_buffer(fullmsg)));
             } else {
@@ -2721,6 +2723,18 @@ static int check_at_res(const at_res_t at_res)
 
 static void show_response(const struct pvt* const pvt, const at_queue_cmd_t* const ecmd, const struct ast_str* const response, const at_res_t at_res)
 {
+    switch (at_res) {
+        case RES_CMGR:
+        case RES_CMGL:
+        case RES_CMT:
+        case RES_CBM:
+        case RES_CDS:
+        case RES_CLASS0:
+            ast_debug(2, "[%s] SMS response %s (content omitted)\n", PVT_ID(pvt), at_res2str(at_res));
+            return;
+        default:
+            break;
+    }
     // U+2190 : Leftwards arrow : 0xE2 0x86 0x90
     if (ecmd && ecmd->cmd == CMD_USER) {
         if (check_at_res(at_res)) {
@@ -3014,7 +3028,7 @@ int at_response(struct pvt* const pvt, const struct ast_str* const response, con
                         break;
                 }
             }
-            ast_debug(1, "[%s] Ignoring unknown result: '%s'\n", PVT_ID(pvt), ast_str_buffer(response));
+            ast_debug(1, "[%s] Ignoring unknown result (content omitted)\n", PVT_ID(pvt));
             break;
 
         case COMPATIBILITY_RES_START_AT_MINUSONE:

@@ -42,6 +42,8 @@ static const size_t DBKEY_DEF_LEN = 32;
 
 // OPER: incoming_msg
 DEFINE_SQL_STATEMENT(get_incomingmsg, "SELECT message FROM incoming_msg WHERE key = ? ORDER BY seqorder")
+DEFINE_SQL_STATEMENT(expire_incomingmsg, "DELETE FROM temp.incoming_msg WHERE expiration <= strftime('%s')")
+DEFINE_SQL_STATEMENT(incoming_capacity, "SELECT COUNT(*), COALESCE(SUM(length(CAST(message AS BLOB))), 0) FROM temp.incoming_msg")
 DEFINE_SQL_STATEMENT(get_incomingmsg_cnt, "SELECT COUNT(seqorder) FROM incoming_msg WHERE key = ?")
 DEFINE_SQL_STATEMENT(put_incomingmsg,
                      "INSERT OR REPLACE INTO incoming_msg (key, seqorder, expiration, message) "
@@ -259,11 +261,16 @@ static void db_unlock(sqlite3_mutex* const mtx)
 
 static int db_create(void)
 {
+    DEFINE_INTERNAL_SQL_STATEMENT(set_temp_store, "PRAGMA temp_store=MEMORY")
+    if (EXECUTE_STMT(set_temp_store)) {
+        return -1;
+    }
+
     // TABLE: incoming_msg
     DEFINE_INTERNAL_SQL_STATEMENT(create_incomingmsg,
-                                  "CREATE TABLE IF NOT EXISTS incoming_msg (key VARCHAR(256), seqorder INTEGER,"
+                                  "CREATE TEMP TABLE IF NOT EXISTS incoming_msg (key VARCHAR(256), seqorder INTEGER,"
                                   "expiration TIMESTAMP DEFAULT (strftime('%s')), message VARCHAR(256), PRIMARY KEY(key, seqorder))")
-    DEFINE_INTERNAL_SQL_STATEMENT(create_incomingmsg_index, "CREATE INDEX IF NOT EXISTS incoming_key ON incoming_msg(key)")
+    DEFINE_INTERNAL_SQL_STATEMENT(create_incomingmsg_index, "CREATE INDEX IF NOT EXISTS temp.incoming_key ON incoming_msg(key)")
 
     // TABLE: outgoing_msg(KEY: IMSI/DEST_ADDR)
     DEFINE_INTERNAL_SQL_STATEMENT(create_outgoingmsg,
@@ -300,6 +307,8 @@ static int db_init_statements(void)
     SCOPED_DB(smsdb);
 
     INIT_VSTMT(get_incomingmsg);
+    INIT_VSTMT(expire_incomingmsg);
+    INIT_VSTMT(incoming_capacity);
     INIT_VSTMT(put_incomingmsg);
     INIT_VSTMT(del_incomingmsg);
     INIT_VSTMT(get_incomingmsg_cnt);
@@ -319,10 +328,10 @@ static int db_init_statements(void)
     INIT_VSTMT(get_all_status);
     INIT_VSTMT(get_outgoingmsg_expired);
 
-    return get_incomingmsg_res || put_incomingmsg_res || del_incomingmsg_res || get_incomingmsg_cnt_res || put_outgoingref_res || set_outgoingref_res ||
-           get_outgoingref_res || put_outgoingmsg_res || put_outgoingpart_res || del_outgoingmsg_res || del_outgoingpart_res || get_outgoingmsg_key_res ||
-           get_outgoingpart_res || set_outgoingpart_res || cnt_outgoingpart_res || cnt_all_outgoingpart_res || get_outgoingmsg_res || get_all_status_res ||
-           get_outgoingmsg_expired_res;
+    return expire_incomingmsg_res || incoming_capacity_res || get_incomingmsg_res || put_incomingmsg_res || del_incomingmsg_res || get_incomingmsg_cnt_res ||
+           put_outgoingref_res || set_outgoingref_res || get_outgoingref_res || put_outgoingmsg_res || put_outgoingpart_res || del_outgoingmsg_res ||
+           del_outgoingpart_res || get_outgoingmsg_key_res || get_outgoingpart_res || set_outgoingpart_res || cnt_outgoingpart_res ||
+           cnt_all_outgoingpart_res || get_outgoingmsg_res || get_all_status_res || get_outgoingmsg_expired_res;
 }
 
 static void db_clean_statements(void)
@@ -330,6 +339,8 @@ static void db_clean_statements(void)
     SCOPED_DB(smsdb);
 
     CLEAN_STMT(get_incomingmsg);
+    CLEAN_STMT(expire_incomingmsg);
+    CLEAN_STMT(incoming_capacity);
     CLEAN_STMT(get_incomingmsg_cnt);
     CLEAN_STMT(put_incomingmsg);
     CLEAN_STMT(del_incomingmsg);
@@ -529,6 +540,16 @@ int smsdb_put(const char* id, const char* addr, int ref, int parts, int order, c
     }
 
     int res;
+    SCOPED_DB(smsdb);
+    SCOPED_STMT(expire_incomingmsg);
+    if (sqlite3_step(expire_incomingmsg) != SQLITE_DONE) {
+        return -1;
+    }
+    SCOPED_STMT(incoming_capacity);
+    if (sqlite3_step(incoming_capacity) != SQLITE_ROW || parts < 1 || parts > 255 || order < 1 || order > parts ||
+        sqlite3_column_int(incoming_capacity, 0) >= 1024 || sqlite3_column_int(incoming_capacity, 1) + strlen(msg) > 1048576) {
+        return -1;
+    }
     SCOPED_TRANSACTION(dbtrans);
 
     if ((res = put_incmsg(fullkey, order, msg))) {
