@@ -72,17 +72,6 @@ ssize_t at_read(const char* dev, int fd, struct ringbuffer* rb)
             rb_write_upd(rb, n);
 
             ast_debug(6, "[%s] receive %zu byte, used %zu, free %zu, read %zu, write %zu\n", dev, n, rb_used(rb), rb_free(rb), rb->read, rb->write);
-
-            iovcnt = rb_read_all_iov(rb, iov);
-
-            if (iovcnt > 0) {
-                if (iovcnt == 2) {
-                    ast_debug(5, "[%s] [%u+%u][%s%s]\n", dev, (unsigned)iov[0].iov_len, (unsigned)iov[1].iov_len, tmp_esc_nstr(iov[0].iov_base, iov[0].iov_len),
-                              tmp_esc_nstr(iov[1].iov_base, iov[1].iov_len));
-                } else {
-                    ast_debug(5, "[%s] [%u][%s]\n", dev, (unsigned)iov[0].iov_len, tmp_esc_nstr(iov[0].iov_base, iov[0].iov_len));
-                }
-            }
         }
     } else {
         ast_log(LOG_ERROR, "[%s] at cmd receive buffer overflow\n", dev);
