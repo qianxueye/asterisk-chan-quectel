@@ -12,6 +12,8 @@ Final modem submission confirmations and carrier delivery reports use `NOTICE`, 
 
 Direct SMS reception enables carrier status-report indications with `AT+CNMI` parameter `<ds>=1`, both during initialization and when switching message mode. The outgoing SMS request already asks for a report. Ordinary message delivery, broadcast indications, buffer handling, and the stored-message mode remain unchanged. The existing `+CDS` parser and acknowledgement path handle reports without enabling diagnostic logging. See the [Quectel SMS application note](https://quectel.com/content/uploads/2021/03/Quectel_GSM_SMS_Application_Note_V1.1.pdf).
 
+Valid parsed reports remain eligible for acknowledgement even if the outgoing record is absent, incomplete, or unavailable. Aggregate completion still requires successful database association. The existing configured message-service gate and acknowledgement command remain unchanged; this repair does not change the modem's message service.
+
 Log consumers must monitor a file that includes `notice`, such as `/var/log/asterisk/full.log`, and recognize the existing `Successfully sent message` and `Got status report` formats. Keep core verbosity, debug and trace at 0 and AGI debug off. Do not enable verbose logging to obtain receipts: other outgoing message-handler paths can log message text at verbose level 1. The Telegram Bot and its command menus do not need to change for this logging fix.
 
 This boundary requires body-free dialplan arguments, core variable debug disabled, AGI debug off, and no AMI/Stasis consumer that persists SMS variables. Asterisk core itself can log variable contents under diagnostic settings. Modem/carrier retention and forensic RAM erasure are outside this boundary.
