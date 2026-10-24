@@ -229,7 +229,7 @@ int at_enqueue_initialization(struct cpvt* cpvt)
                 }
 
                 if (CONF_SHARED(pvt, msg_direct) > 0) {
-                    err = at_fill_generic_cmd(&dyn_cmd, "AT+CNMI=2,2,2,0,%d\r", CONF_SHARED(pvt, reset_modem) ? 1 : 0);
+                    err = at_fill_generic_cmd(&dyn_cmd, "AT+CNMI=2,2,2,1,%d\r", CONF_SHARED(pvt, reset_modem) ? 1 : 0);
                 } else {
                     err = at_fill_generic_cmd(&dyn_cmd, "AT+CNMI=2,1,0,2,%d\r", CONF_SHARED(pvt, reset_modem) ? 1 : 0);
                 }
@@ -1159,7 +1159,7 @@ int at_enqueue_delete_sms_n(struct cpvt* cpvt, int idx, tristate_bool_t ack)
 
 int at_enqueue_msg_direct(struct cpvt* cpvt, int directflag)
 {
-    DECLARE_AT_CMD(cnmi_direct, "+CNMI=2,2,2,0,0");
+    DECLARE_AT_CMD(cnmi_direct, "+CNMI=2,2,2,1,0");
     DECLARE_AT_CMD(cnmi_indirect, "+CNMI=2,1,0,2,0");
 
     static const at_queue_cmd_t cmd_direct   = ATQ_CMD_DECLARE_STI(CMD_AT_CNMI, cnmi_direct);
