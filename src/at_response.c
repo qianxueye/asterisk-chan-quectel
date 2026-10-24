@@ -1430,9 +1430,9 @@ static int at_response_cmgs(struct pvt* const pvt, const struct ast_str* const r
         ast_debug(3, "[%s][SMS:%d REF:%d] Successfully sent message part %d/%d\n", PVT_ID(pvt), task->uid, refid, partno, partcnt);
     } else {
         if (partcnt <= 1) {
-            ast_verb(1, "[%s][SMS:%d REF:%d] Successfully sent message\n", PVT_ID(pvt), task->uid, refid);
+            ast_log(LOG_NOTICE, "[%s][SMS:%d REF:%d] Successfully sent message\n", PVT_ID(pvt), task->uid, refid);
         } else {
-            ast_verb(1, "[%s][SMS:%d] Successfully sent message [%d parts]\n", PVT_ID(pvt), task->uid, partcnt);
+            ast_log(LOG_NOTICE, "[%s][SMS:%d] Successfully sent message [%d parts]\n", PVT_ID(pvt), task->uid, partcnt);
         }
 
         pvt->outgoing_sms = 0;
@@ -1617,7 +1617,7 @@ static int at_response_msg(struct pvt* const pvt, const struct ast_str* const re
     ast_str_update(msg);
     switch (PDUTYPE_MTI(tpdu_type)) {
         case PDUTYPE_MTI_SMS_STATUS_REPORT: {
-            ast_verb(1, "[%s][SMS:%d] Got status report from %s and status code %d\n", PVT_ID(pvt), mr, ast_str_buffer(oa), st);
+            ast_log(LOG_NOTICE, "[%s][SMS:%d] Got status report from %s and status code %d\n", PVT_ID(pvt), mr, ast_str_buffer(oa), st);
 
             RAII_VAR(int*, status_report, ast_calloc(sizeof(int), 256), ast_free);
             if (!smsdb_outgoing_part_status(pvt->imsi, ast_str_buffer(oa), mr, st, status_report)) {
