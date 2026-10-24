@@ -33,6 +33,40 @@ def sql(name):
 
 
 class PrivacyTests(unittest.TestCase):
+    def test_delivery_receipts_remain_visible_with_verbose_disabled(self):
+        source = (ROOT/'src/at_response.c').read_text()
+        blocks = [function(source, 'static int at_response_cmgs('),
+                  function(source, 'case PDUTYPE_MTI_SMS_STATUS_REPORT:')]
+        statements = [statement for block in blocks
+                      for statement in re.findall(r'ast_(?:verb|debug|log)\([^;]+;', block)
+                      if 'Successfully sent message' in statement or 'Got status report' in statement]
+        self.assertEqual(len(statements), 4)
+        code = '''#include <stdio.h>
+struct ast_str {const char *value;};
+struct task {int uid;};
+#define PVT_ID(p) "quectel1"
+#define LOG_NOTICE 1
+#define ast_verb(level, ...) do {if ((level) <= 0) printf(__VA_ARGS__);} while (0)
+#define ast_debug(level, ...) do {} while (0)
+#define ast_log(level, ...) do {if ((level) == LOG_NOTICE) printf(__VA_ARGS__);} while (0)
+const char *ast_str_buffer(const struct ast_str *s) {return s->value;}
+int main(void) {
+struct task value={123}; const struct task *task=&value;
+int refid=45, partcnt=3, partno=1, mr=45, st=0;
+struct ast_str number={"+10000000000"}; const struct ast_str *oa=&number;
+'''+ '\n'.join(statements) + '\nreturn 0;}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path/'test.c').write_text(code)
+            subprocess.run(['cc', '-std=c11', str(path/'test.c'), '-o', str(path/'test')],
+                           check=True, capture_output=True)
+            output = subprocess.check_output([str(path/'test')], text=True)
+        self.assertEqual(output.splitlines(), [
+            '[quectel1][SMS:123 REF:45] Successfully sent message',
+            '[quectel1][SMS:123] Successfully sent message [3 parts]',
+            '[quectel1][SMS:45] Got status report from +10000000000 and status code 0',
+        ])
+
     def test_actual_sms_and_channel_variable_logs_omit_body(self):
         source = (ROOT/'src/at_response.c').read_text()
         code = '''#include <stdio.h>

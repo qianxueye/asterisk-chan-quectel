@@ -6,4 +6,10 @@ Multipart assembly uses a TEMP table with `temp_store=MEMORY`, even when the out
 
 Outgoing tables, acknowledgements and delivery reporting retain their existing behavior. Historical disk tables and backups are preserved; this change does not erase previously retained bodies. The existing connection-wide transaction serialization issue outside multipart ingress is not addressed here.
 
+## Delivery receipt logging
+
+Final modem submission confirmations and carrier delivery reports use `NOTICE`, including the final confirmation for multipart sends. They contain identifiers, the recipient number when supplied by the carrier, and the result; they do not contain message text. A modem submission confirmation does not prove delivery to the recipient. Carrier delivery reports are only available when the network returns them.
+
+Log consumers must monitor a file that includes `notice`, such as `/var/log/asterisk/full.log`, and recognize the existing `Successfully sent message` and `Got status report` formats. Keep core verbosity, debug and trace at 0 and AGI debug off. Do not enable verbose logging to obtain receipts: other outgoing message-handler paths can log message text at verbose level 1. The Telegram Bot and its command menus do not need to change for this logging fix.
+
 This boundary requires body-free dialplan arguments, core variable debug disabled, AGI debug off, and no AMI/Stasis consumer that persists SMS variables. Asterisk core itself can log variable contents under diagnostic settings. Modem/carrier retention and forensic RAM erasure are outside this boundary.
