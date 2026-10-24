@@ -33,6 +33,58 @@ def sql(name):
 
 
 class PrivacyTests(unittest.TestCase):
+    def test_valid_delivery_report_ack_does_not_depend_on_database_match(self):
+        source = (ROOT/'src/at_response.c').read_text()
+        status = function(source, 'case PDUTYPE_MTI_SMS_STATUS_REPORT:')
+        ack = function(source, 'msg_done_ack:')
+        code = '''#include <assert.h>
+#include <stdlib.h>
+struct pvt {int msg_service; const char *imsi; int sys_chan;};
+struct ast_str {const char *value;}; struct ast_json;
+enum {PDUTYPE_MTI_SMS_STATUS_REPORT=1, RES_CMGR, RES_CMT, RES_CDS, RES_CLASS0};
+enum {TRIBOOL_FALSE=-1, TRIBOOL_NONE=0, TRIBOOL_TRUE=1};
+static int database_result, acknowledgements, aggregates;
+#define CONF_SHARED(p,f) ((p)->f)
+#define PVT_ID(p) "quectel1"
+#define ast_str_buffer(s) ((s)->value)
+#define RAII_VAR(type,name,value,cleanup) type name=value
+#define ast_calloc calloc
+#define ast_verb(...) ((void)0)
+#define ast_log(...) ((void)0)
+#define ast_json_object_create() ((struct ast_json *)0)
+#define ast_json_array_create() ((struct ast_json *)0)
+#define ast_json_object_set(...) ((void)0)
+#define ast_json_array_append(...) ((void)0)
+#define channel_start_local_report(...) (++aggregates)
+#define at_sms_retrieved(...) ((void)0)
+#define at_enqueue_msg_ack(...) ((void)0)
+static int smsdb_outgoing_part_status(const char *id,const char *number,int mr,int st,int *statuses)
+{statuses[0]=-1;return database_result;}
+static int at_enqueue_msg_ack_n(int *channel,int n,int uid)
+{assert(n==0 && uid==45);++acknowledgements;return 0;}
+static void report(int service,int result) {
+struct pvt state={service,"synthetic"}; struct pvt *pvt=&state;
+struct ast_str number={"+10000000000"}; struct ast_str *oa=&number;
+int mr=45,st=0,msg_ack=TRIBOOL_NONE,msg_ack_uid=0,msg_complete=0,cmd=RES_CDS;
+database_result=result;acknowledgements=0;aggregates=0;
+switch(PDUTYPE_MTI_SMS_STATUS_REPORT) {
+'''+status+'\n}\n'+ack+'''
+assert(acknowledgements==(service>0));
+assert(aggregates==(result==0));
+}
+int main(void) {
+for(int service=-1;service<=1;service++) {
+report(service,0);report(service,1);report(service,-1);
+}
+return 0;}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path/'test.c').write_text(code)
+            subprocess.run(['cc', '-std=c11', str(path/'test.c'), '-o', str(path/'test')],
+                           check=True, capture_output=True)
+            subprocess.run([str(path/'test')], check=True, capture_output=True)
+
     def test_delivery_receipts_remain_visible_with_verbose_disabled(self):
         source = (ROOT/'src/at_response.c').read_text()
         blocks = [function(source, 'static int at_response_cmgs('),

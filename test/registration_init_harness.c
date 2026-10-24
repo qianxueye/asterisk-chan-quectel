@@ -75,6 +75,8 @@ struct pvt {
     const char* cell_id;
 };
 struct ast_str { char* data; };
+static int chan_quectel_err;
+enum { E_QUEUE = 1 };
 #define ast_str_buffer(value) ((value)->data)
 #define MESSAGE_STORAGE_AUTO 0
 #define CALL_WAITING_AUTO 2
@@ -87,8 +89,7 @@ int at_queue_run(struct pvt* pvt) { return 0; }
 static const char* dc_msgstor2str(int storage) { return "SM"; }
 static int at_fill_generic_cmd(at_queue_cmd_t* cmd, const char* format, ...)
 {
-    /* Only the existing DTMF duration command remains dynamic in these profiles. */
-    assert(cmd->cmd == CMD_AT_VTD);
+    assert(cmd->cmd == CMD_AT_VTD || cmd->cmd == CMD_AT_CNMI);
     va_list arguments;
     va_start(arguments, format);
     char buffer[64];
@@ -117,7 +118,7 @@ static char* ast_strip_quoted(char* text, const char* beginning, const char* end
 
 /* INSERT PRODUCTION FUNCTIONS */
 
-static void run_initialization(const char* manufacturer, unsigned int dtmf, unsigned int reset_modem, int reject_lte_query)
+static void run_initialization(const char* manufacturer, unsigned int dtmf, unsigned int reset_modem, int msg_direct, int reject_lte_query)
 {
     struct pvt pvt = {0};
     pvt.sys_chan.pvt = &pvt;
@@ -127,6 +128,7 @@ static void run_initialization(const char* manufacturer, unsigned int dtmf, unsi
     pvt.gsm_reg_status = -1;
     pvt.dtmf = dtmf;
     pvt.reset_modem = reset_modem;
+    pvt.msg_direct = msg_direct;
 
     assert(at_enqueue_initialization(&pvt.sys_chan) == 0);
     assert(pvt.at_tasks == 1);
@@ -138,6 +140,7 @@ static void run_initialization(const char* manufacturer, unsigned int dtmf, unsi
     unsigned int creg_count = 0;
     unsigned int cereg_count = 0;
     unsigned int final_count = 0;
+    unsigned int cnmi_count = 0;
     while (pvt.at_queue.first) {
         at_queue_task_t* const task = pvt.at_queue.first;
         const at_queue_cmd_t* const cmd = at_queue_task_cmd(task);
@@ -150,6 +153,12 @@ static void run_initialization(const char* manufacturer, unsigned int dtmf, unsi
             /* Manufacturer handling must append; it cannot replace the active common task. */
             assert(pvt.at_queue.first == task && pvt.at_tasks == 2);
             assert(task->entry.next != NULL);
+        } else if (cmd->cmd == CMD_AT_CNMI) {
+            char expected[64];
+            snprintf(expected, sizeof(expected), msg_direct > 0 ? "AT+CNMI=2,2,2,1,%u\r" : "AT+CNMI=2,1,0,2,%u\r", reset_modem);
+            assert(cmd->length == strlen(expected));
+            assert(!memcmp(cmd->data, expected, cmd->length));
+            ++cnmi_count;
         } else if (cmd->cmd == CMD_AT_CREG) {
             assert(cmd->length == strlen("AT+CREG?\r"));
             assert(!memcmp(cmd->data, "AT+CREG?\r", cmd->length));
@@ -185,6 +194,7 @@ static void run_initialization(const char* manufacturer, unsigned int dtmf, unsi
     }
 
     assert(creg_count == 1 && final_count == 1);
+    assert(cnmi_count == (msg_direct != 0));
     assert(pvt.at_tasks == 0 && pvt.at_cmds == 0);
     if (!strcasecmp(manufacturer, "Quectel") || !strcasecmp(manufacturer, "SimCom")) {
         assert(cereg_count == 1 && creg_index < cereg_index && cereg_index < final_index);
@@ -194,17 +204,35 @@ static void run_initialization(const char* manufacturer, unsigned int dtmf, unsi
     }
 }
 
+static void run_message_mode_switch(int direct)
+{
+    struct pvt pvt = {0};
+    pvt.sys_chan.pvt = &pvt;
+    assert(at_enqueue_msg_direct(&pvt.sys_chan, direct) == 0);
+    assert(pvt.at_tasks == 1 && pvt.at_cmds == 1);
+    const at_queue_cmd_t* cmd = at_queue_task_cmd(pvt.at_queue.first);
+    const char* expected = direct ? "AT+CNMI=2,2,2,1,0\r" : "AT+CNMI=2,1,0,2,0\r";
+    assert(cmd->cmd == CMD_AT_CNMI && cmd->length == strlen(expected));
+    assert(!memcmp(cmd->data, expected, cmd->length));
+    at_queue_remove_cmd(&pvt, RES_OK);
+    assert(pvt.at_tasks == 0 && pvt.at_cmds == 0);
+}
+
 int main(void)
 {
     const char* manufacturers[] = {"Quectel", "SimCom", "Other"};
     for (unsigned int i = 0; i < ARRAY_LEN(manufacturers); ++i) {
         for (unsigned int dtmf = 0; dtmf <= 1; ++dtmf) {
             for (unsigned int reset = 0; reset <= 1; ++reset) {
-                run_initialization(manufacturers[i], dtmf, reset, 0);
+                for (int direct = -1; direct <= 1; ++direct) {
+                    run_initialization(manufacturers[i], dtmf, reset, direct, 0);
+                }
             }
         }
     }
-    run_initialization("Quectel", 0, 0, 1);
-    puts("Registration initialization passed: common CREG before vendor CEREG, observed LTE registration, optional query failure, 13 profiles");
+    run_initialization("Quectel", 0, 0, 0, 1);
+    run_message_mode_switch(0);
+    run_message_mode_switch(1);
+    puts("Registration and SMS indication initialization passed: 37 startup profiles and both message mode switches");
     return 0;
 }

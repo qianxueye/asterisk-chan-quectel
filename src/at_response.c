@@ -1617,6 +1617,8 @@ static int at_response_msg(struct pvt* const pvt, const struct ast_str* const re
     ast_str_update(msg);
     switch (PDUTYPE_MTI(tpdu_type)) {
         case PDUTYPE_MTI_SMS_STATUS_REPORT: {
+            msg_ack     = TRIBOOL_TRUE;
+            msg_ack_uid = mr;
             ast_log(LOG_NOTICE, "[%s][SMS:%d] Got status report from %s and status code %d\n", PVT_ID(pvt), mr, ast_str_buffer(oa), st);
 
             RAII_VAR(int*, status_report, ast_calloc(sizeof(int), 256), ast_free);
@@ -1636,8 +1638,6 @@ static int at_response_msg(struct pvt* const pvt, const struct ast_str* const re
                 ast_json_object_set(report, "status", statuses);
 
                 ast_verb(2, "[%s][SMS:%d] Report: success:%d\n", PVT_ID(pvt), mr, success);
-                msg_ack      = TRIBOOL_TRUE;
-                msg_ack_uid  = mr;
                 msg_complete = 1;
                 channel_start_local_report(pvt, "sms", LOCAL_REPORT_DIRECTION_INCOMING, ast_str_buffer(oa), &scts, &dt, success, report);
             }

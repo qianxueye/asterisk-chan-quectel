@@ -18,6 +18,7 @@ FUNCTIONS = {
     "src/at_command.c": [
         "at_enqueue_initialization", "at_enqueue_initialization_quectel",
         "at_enqueue_initialization_simcom", "at_enqueue_initialization_other",
+        "at_enqueue_msg_direct",
     ],
     "src/helpers.c": ["gsm_is_registered"],
     "src/at_parse.c": ["mark_line", "strip_quoted", "at_parse_creg"],
