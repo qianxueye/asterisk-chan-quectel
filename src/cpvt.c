@@ -160,6 +160,17 @@ static void cpvt_stop_uac(struct pvt* const pvt)
     }
 }
 
+static void cpvt_reset_playback_observation(struct cpvt* const cpvt, int activated)
+{
+    cpvt->playback_last_media_ms       = 0;
+    cpvt->playback_stall_since_ms      = 0;
+    cpvt->playback_validation_since_ms = 0;
+    cpvt->playback_blocked_callbacks   = 0;
+    cpvt->playback_avail_valid         = 0;
+    cpvt->playback_last_write_blocked  = 0;
+    cpvt->playback_validating          = activated && cpvt->playback_recovery_attempted;
+}
+
 void cpvt_call_disactivate(struct cpvt* const cpvt)
 {
     if (!(cpvt->pvt && CPVT_TEST_FLAG(cpvt, CALL_FLAG_ACTIVATED))) {
@@ -167,6 +178,8 @@ void cpvt_call_disactivate(struct cpvt* const cpvt)
     }
 
     struct pvt* const pvt = cpvt->pvt;
+
+    cpvt_reset_playback_observation(cpvt, 0);
 
     if (CONF_UNIQ(pvt, uac) > TRIBOOL_FALSE) {
         /* A late HOLD/RELEASE for the previous master must not stop the new
@@ -210,6 +223,7 @@ int cpvt_call_activate(struct cpvt* const cpvt)
         if (CPVT_IS_MASTER(cpvt2)) {
             replacing_master = 1;
             ast_debug(6, "[%s] Call idx:%d gave master\n", PVT_ID(pvt), cpvt2->call_idx);
+            cpvt_reset_playback_observation(cpvt2, 0);
         }
 
         CPVT_RESET_FLAG(cpvt2, CALL_FLAG_MASTER);
@@ -243,6 +257,7 @@ int cpvt_call_activate(struct cpvt* const cpvt)
 
     if (pvt->audio_fd >= 0) {
         if (uac) {
+            cpvt_reset_playback_observation(cpvt, 1);
             if (replacing_master) {
                 cpvt_stop_uac(pvt);
             }

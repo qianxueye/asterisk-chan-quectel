@@ -15,8 +15,8 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = {
     "src/chan_quectel.c": ["soundcard_init", "pvt_on_remove_last_channel"],
-    "src/cpvt.c": ["cpvt_free", "cpvt_stop_uac", "cpvt_call_disactivate", "cpvt_call_activate"],
-    "src/channel.c": ["channel_start_capture", "channel_read_uac", "channel_read", "channel_write_uac", "channel_write"],
+    "src/cpvt.c": ["cpvt_free", "cpvt_stop_uac", "cpvt_reset_playback_observation", "cpvt_call_disactivate", "cpvt_call_activate"],
+    "src/channel.c": ["channel_start_capture", "channel_read_uac", "channel_read", "playback_clock_ms", "playback_consumed", "channel_write_uac", "channel_write"],
 }
 
 
