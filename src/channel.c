@@ -816,6 +816,10 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
         cpvt->playback_last_media_ms = now_ms;
     }
 
+    /* Playback XRUN means queued samples were consumed before the next burst. */
+    if (pvt->ocard && snd_pcm_state(pvt->ocard) == SND_PCM_STATE_XRUN) {
+        consumed = 1;
+    }
     int res = pcm_prepare_playback(pvt->ocard);
 
     if (res < 0) {
@@ -824,6 +828,9 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
 
     if (pvt->ocard && snd_pcm_state(pvt->ocard) == SND_PCM_STATE_RUNNING) {
         before_avail = snd_pcm_avail(pvt->ocard);
+        if (before_avail == -EPIPE) {
+            consumed = 1;
+        }
         if (before_avail >= 0 && cpvt->playback_avail_valid && before_avail > cpvt->playback_last_avail) {
             consumed = 1;
         }
@@ -891,6 +898,9 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
             continue;
         }
         if (!recovered && (res == -EPIPE || res == -ESTRPIPE)) {
+            if (res == -EPIPE) {
+                consumed = 1;
+            }
             recovered = 1;
             res       = pcm_prepare_playback(pvt->ocard);
             if (!res) {

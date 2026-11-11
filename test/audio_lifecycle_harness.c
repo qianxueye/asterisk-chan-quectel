@@ -500,6 +500,60 @@ static void test_playback_recovery_validation(void)
     assert(playback.drops == 1 && capture.drops == 0 && hangups == 0);
 }
 
+static void test_playback_xrun_bursts_validate_consumption(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 1 && a.playback_validating);
+    for (int burst = 0; burst < 11; ++burst) {
+        for (int i = 0; i < 5; ++i) {
+            fake_now_ms += 20;
+            assert(channel_write(&ca, &f) == 0);
+        }
+        assert(playback.state == SND_PCM_STATE_RUNNING);
+        playback_avail = 8000;
+        playback.state = SND_PCM_STATE_XRUN;
+        fake_now_ms += 120;
+        assert(channel_write(&ca, &f) == 0);
+        assert(!a.playback_validating && !a.playback_failed);
+    }
+    assert(playback.drops == 1 && capture.drops == 0 && hangups == 0);
+}
+
+static void test_playback_write_xrun_validates_consumption(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 1 && a.playback_validating);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 1000;
+    write_count = write_index + 1;
+    write_results[write_index] = -EPIPE;
+    fake_now_ms += 20;
+    assert(channel_write(&ca, &f) == 0);
+    assert(!a.playback_validating && !a.playback_failed && playback.drops == 1 && hangups == 0);
+}
+
 static void test_playback_terminal_failures(void)
 {
     struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
@@ -726,6 +780,8 @@ int main(void)
     test_running_playback_stall();
     test_transient_playback_congestion();
     test_playback_recovery_validation();
+    test_playback_xrun_bursts_validate_consumption();
+    test_playback_write_xrun_validates_consumption();
     test_playback_terminal_failures();
     test_playback_observation_resets_on_hold();
     test_playback_accepts_without_consuming();
@@ -735,7 +791,7 @@ int main(void)
     test_second_stall_ends_call_without_restart();
     test_last_channel_cleanup();
     test_disconnect_frees_all_channels();
-    puts("Audio lifecycle regressions: 16 scenario groups passed");
+    puts("Audio lifecycle regressions: 18 scenario groups passed");
     return 0;
 }
 
