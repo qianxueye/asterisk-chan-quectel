@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #ifdef CHANNEL_LOCK_REGRESSION
 #include <pthread.h>
 #endif
@@ -84,6 +85,14 @@ struct cpvt {
     int call_idx, state, rd_pipe[2], mixstream;
     void *buffer;
     struct ast_frame frame;
+    int64_t playback_last_media_ms, playback_stall_since_ms, playback_validation_since_ms;
+    long playback_last_avail;
+    unsigned int playback_blocked_callbacks;
+    unsigned int playback_avail_valid : 1;
+    unsigned int playback_last_write_blocked : 1;
+    unsigned int playback_recovery_attempted : 1;
+    unsigned int playback_validating : 1;
+    unsigned int playback_failed : 1;
 };
 struct pvt {
 #ifdef CHANNEL_LOCK_REGRESSION
@@ -104,13 +113,32 @@ struct pvt {
 static struct ast_format format;
 static struct ast_frame ast_null_frame;
 static snd_pcm_t capture, playback;
-static int avail_result, read_result, write_results[16], write_count, write_index;
-static int write_offsets[16], write_sizes[16], start_error, transient_start_errors;
+static int avail_result, read_result, write_results[512], write_count, write_index;
+static int write_offsets[512], write_sizes[512], start_error, transient_start_errors;
+static snd_pcm_sframes_t playback_avail;
+static long fake_now_ms;
+static int playback_block_until_drop, playback_block_after_drop, playback_drop_error, playback_prepare_error;
 static int start_calls, capture_prepare_calls, playback_prepare_calls;
 static int sequence, start_sequence, fd_sequence, tty_reads, tty_writes;
 static int close_calls, timer_closes, relinks, restates, link_calls, hangups;
 static int disconnect_hangups, disconnect_releases;
 static const int16_t *write_origin;
+
+static int fake_clock_gettime(clockid_t clock, struct timespec *ts)
+{
+#ifdef CHANNEL_LOCK_REGRESSION
+    return clock_gettime(clock, ts);
+#else
+    assert(clock == CLOCK_MONOTONIC);
+    ts->tv_sec = fake_now_ms / 1000;
+    ts->tv_nsec = (fake_now_ms % 1000) * 1000000;
+    return 0;
+#endif
+}
+#define clock_gettime fake_clock_gettime
+
+static snd_pcm_sframes_t snd_pcm_avail(snd_pcm_t *pcm)
+{ assert(pcm == &playback); return playback_avail; }
 
 static int pcm_start_capture(snd_pcm_t *pcm)
 {
@@ -129,13 +157,22 @@ static int pcm_prepare_playback(snd_pcm_t *pcm)
 {
     assert(pcm == &playback);
     ++playback_prepare_calls;
+    if (pcm->drops && playback_prepare_error) return playback_prepare_error;
     if (pcm->state != SND_PCM_STATE_PREPARED && pcm->state != SND_PCM_STATE_RUNNING) {
         ++pcm->prepares;
         pcm->state = SND_PCM_STATE_PREPARED;
     }
     return 0;
 }
-static int snd_pcm_drop(snd_pcm_t *pcm) { ++pcm->drops; pcm->state = SND_PCM_STATE_SETUP; return 0; }
+static snd_pcm_state_t snd_pcm_state(snd_pcm_t *pcm) { return pcm->state; }
+static int snd_pcm_drop(snd_pcm_t *pcm)
+{
+    ++pcm->drops;
+    if (pcm == &playback && playback_drop_error) return playback_drop_error;
+    pcm->state = SND_PCM_STATE_SETUP;
+    if (pcm == &playback) playback_avail = 8000;
+    return 0;
+}
 static const char *snd_strerror(int err) { return "fake ALSA error"; }
 static snd_pcm_sframes_t snd_pcm_avail_update(snd_pcm_t *pcm)
 {
@@ -157,14 +194,20 @@ static int snd_pcm_mmap_readi(snd_pcm_t *pcm, void *data, size_t frames)
 static int snd_pcm_mmap_writei(snd_pcm_t *pcm, const void *data, size_t frames)
 {
     assert(pcm == &playback);
-    assert(write_index < 16);
+    assert(write_index < 512);
     write_offsets[write_index] = (const int16_t *)data - write_origin;
     write_sizes[write_index] = (int)frames;
-    int result = write_index < write_count ? write_results[write_index] : (int)frames;
+    int result = ((playback_block_until_drop && !pcm->drops) ||
+        (playback_block_after_drop && pcm->drops) || playback_avail < (snd_pcm_sframes_t)frames)
+        ? -EAGAIN : write_index < write_count ? write_results[write_index] : (int)frames;
     ++write_index; ++pcm->writes;
     if (result == -EPIPE) pcm->state = SND_PCM_STATE_XRUN;
     if (result == -ESTRPIPE) pcm->state = SND_PCM_STATE_SUSPENDED;
     assert(result <= (int)frames);
+    if (result > 0) {
+        playback_avail -= result;
+        if (pcm->state == SND_PCM_STATE_PREPARED && playback_avail <= 7200) pcm->state = SND_PCM_STATE_RUNNING;
+    }
     return result;
 }
 static int snd_pcm_mmap_writen(snd_pcm_t *pcm, void **data, size_t frames)
@@ -256,6 +299,8 @@ static void reset(struct pvt *pvt, struct cpvt *cpvt, struct ast_channel *channe
     *cpvt = (struct cpvt) { .pvt = pvt, .channel = channel, .rd_pipe = { -1, -1 } };
     *channel = (struct ast_channel) { .cpvt = cpvt, .fd = { -1, -1 } };
     avail_result = 160; read_result = 0; write_count = write_index = 0;
+    playback_avail = 8000; fake_now_ms = 1000;
+    playback_block_until_drop = playback_block_after_drop = playback_drop_error = playback_prepare_error = 0;
     transient_start_errors = start_error = 0;
     start_calls = capture_prepare_calls = playback_prepare_calls = 0;
     sequence = start_sequence = fd_sequence = 0;
@@ -391,6 +436,195 @@ static void test_playback_progress_and_recovery(void)
     assert(channel_write(&ca, &f) == 0 && tty_writes == 0 && write_index == 8);
 }
 
+static void test_running_playback_stall(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    write_origin = data;
+    write_count = 150;
+    for (int i = 0; i < write_count; ++i) write_results[i] = -EAGAIN;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 1 && playback.prepares == 1);
+    assert(capture.drops == 0 && capture.prepares == 0);
+}
+
+static void test_transient_playback_congestion(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    write_origin = data;
+    write_count = 120;
+    for (int i = 0; i < write_count; ++i) write_results[i] = i % 2 ? 160 : -EAGAIN;
+    for (int i = 0; i < write_count; ++i) {
+        playback_avail = i % 2 ? 280 : 120;
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 0 && !a.playback_recovery_attempted && hangups == 0);
+}
+
+static void test_playback_recovery_validation(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 1 && a.playback_validating);
+    for (int i = 0; i < 15; ++i) {
+        if (playback.state == SND_PCM_STATE_RUNNING) playback_avail += 160;
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(!a.playback_validating && !a.playback_failed && a.playback_recovery_attempted);
+    assert(playback.drops == 1 && capture.drops == 0 && hangups == 0);
+}
+
+static void test_playback_terminal_failures(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    for (int failure = 0; failure < 3; ++failure) {
+        reset(&p, &a, &ca); cpvt_call_activate(&a);
+        playback.state = SND_PCM_STATE_RUNNING;
+        playback_avail = 120;
+        playback_block_until_drop = 1;
+        playback_block_after_drop = failure == 0;
+        playback_drop_error = failure == 1 ? -EIO : 0;
+        playback_prepare_error = failure == 2 ? -EIO : 0;
+        write_origin = data;
+        int ended = 0;
+        for (int i = 0; i < 220; ++i) {
+            fake_now_ms += 20;
+            if (channel_write(&ca, &f) == -1) { ended = 1; break; }
+        }
+        assert(ended && hangups == 1 && a.playback_failed && a.playback_recovery_attempted);
+        assert(playback.drops == 1 && capture.drops == 0);
+        assert(channel_write(&ca, &f) == -1 && hangups == 1 && playback.drops == 1);
+    }
+}
+
+static void test_playback_observation_resets_on_hold(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 80; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    cpvt_call_disactivate(&a);
+    assert(a.playback_stall_since_ms == 0 && !a.playback_recovery_attempted);
+    cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    int drops_at_resume = playback.drops;
+    for (int i = 0; i < 80; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == drops_at_resume && hangups == 0);
+}
+
+static void test_playback_accepts_without_consuming(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    write_origin = data;
+    fake_now_ms += 20;
+    assert(channel_write(&ca, &f) == 0);
+    for (int i = 0; i < 100; ++i) {
+        if (i == 20) { f.samples = 80; f.datalen = 160; }
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+        f.samples = 160; f.datalen = 320;
+    }
+    assert(playback.drops == 1 && a.playback_recovery_attempted && hangups == 0);
+}
+
+static void test_playback_gap_resets_observation(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 80; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    fake_now_ms += 1000;
+    for (int i = 0; i < 80; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 0 && !a.playback_recovery_attempted && hangups == 0);
+}
+
+static void test_playback_attempt_cap_survives_master_change(void)
+{
+    struct pvt p; struct cpvt a, b; struct ast_channel ca, cb; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    playback_block_after_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(a.playback_recovery_attempted && playback.drops == 1);
+    b = (struct cpvt) { .pvt = &p, .channel = &cb, .rd_pipe = {-1, -1} };
+    cb = (struct ast_channel) { .cpvt = &b, .fd = {-1, -1} };
+    a.next = &b;
+    cpvt_call_activate(&b);
+    assert(!a.playback_validating && a.playback_recovery_attempted);
+    cpvt_call_activate(&a);
+    assert(a.playback_validating && a.playback_recovery_attempted);
+    int drops_at_resume = playback.drops;
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    int ended = 0;
+    for (int i = 0; i < 110; ++i) {
+        fake_now_ms += 20;
+        if (channel_write(&ca, &f) == -1) { ended = 1; break; }
+    }
+    assert(ended && hangups == 1 && playback.drops == drops_at_resume);
+}
+
 static void test_last_channel_cleanup(void)
 {
     struct pvt p; struct cpvt unused; struct ast_channel ca; struct ast_timer timer = {7};
@@ -431,9 +665,17 @@ int main(void)
     test_start_failure_is_bounded();
     test_capture_recovery();
     test_playback_progress_and_recovery();
+    test_running_playback_stall();
+    test_transient_playback_congestion();
+    test_playback_recovery_validation();
+    test_playback_terminal_failures();
+    test_playback_observation_resets_on_hold();
+    test_playback_accepts_without_consuming();
+    test_playback_gap_resets_observation();
+    test_playback_attempt_cap_survives_master_change();
     test_last_channel_cleanup();
     test_disconnect_frees_all_channels();
-    puts("Audio lifecycle regressions: 6 scenario groups passed");
+    puts("Audio lifecycle regressions: 14 scenario groups passed");
     return 0;
 }
 

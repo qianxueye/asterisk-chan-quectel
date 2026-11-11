@@ -15,6 +15,7 @@
 
 #include "ast_config.h"
 
+#include <time.h>
 #include <asterisk/callerid.h> /*  AST_PRES_* */
 #include <asterisk/causes.h>
 #include <asterisk/format_cache.h>
@@ -760,18 +761,104 @@ static int channel_write_tty(struct ast_channel* channel, struct ast_frame* f, s
     return 0;
 }
 
-static int channel_write_uac(struct ast_channel* attribute_unused(channel), struct ast_frame* f, struct cpvt* attribute_unused cpvt, struct pvt* pvt)
+static int64_t playback_clock_ms(void)
 {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now)) {
+        return -1;
+    }
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void playback_consumed(struct cpvt* cpvt, const struct pvt* pvt)
+{
+    cpvt->playback_stall_since_ms = 0;
+    cpvt->playback_blocked_callbacks = 0;
+    cpvt->playback_last_write_blocked = 0;
+    if (cpvt->playback_validating) {
+        cpvt->playback_validating = 0;
+        ast_log(LOG_NOTICE, "[%s][ALSA][PLAYBACK] Playback consumption resumed after restart\n", PVT_ID(pvt));
+    }
+}
+
+static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, struct cpvt* cpvt, struct pvt* pvt)
+{
+    enum { PLAYBACK_MEDIA_GAP_MS = 500, PLAYBACK_STALL_MS = 2000 };
     const int samples = f->samples;
     int written       = 0;
     int recovered     = 0;
+    int consumed      = 0;
+    snd_pcm_sframes_t before_avail = -1;
+    snd_pcm_sframes_t after_avail = -1;
+    const int64_t now_ms = playback_clock_ms();
+
+    if (cpvt->playback_failed) {
+        return -EIO;
+    }
+    if (samples <= 0) {
+        return 0;
+    }
+    if (now_ms >= 0) {
+        if (cpvt->playback_validating && !cpvt->playback_validation_since_ms) {
+            cpvt->playback_validation_since_ms = now_ms;
+        }
+        if (cpvt->playback_last_media_ms && now_ms - cpvt->playback_last_media_ms > PLAYBACK_MEDIA_GAP_MS) {
+            cpvt->playback_stall_since_ms = 0;
+            cpvt->playback_blocked_callbacks = 0;
+            cpvt->playback_avail_valid = 0;
+            cpvt->playback_last_write_blocked = 0;
+            if (cpvt->playback_validating) {
+                cpvt->playback_validation_since_ms = now_ms;
+            }
+        }
+        cpvt->playback_last_media_ms = now_ms;
+    }
+
     int res           = pcm_prepare_playback(pvt->ocard);
 
     if (res < 0) {
         goto w_finish;
     }
-    if (samples <= 0) {
-        return 0;
+
+    if (pvt->ocard && snd_pcm_state(pvt->ocard) == SND_PCM_STATE_RUNNING) {
+        before_avail = snd_pcm_avail(pvt->ocard);
+        if (before_avail >= 0 && cpvt->playback_avail_valid && before_avail > cpvt->playback_last_avail) {
+            consumed = 1;
+        }
+    }
+    if (consumed) {
+        playback_consumed(cpvt, pvt);
+    }
+    if (cpvt->playback_validating && now_ms >= 0 && cpvt->playback_validation_since_ms &&
+        now_ms - cpvt->playback_validation_since_ms >= PLAYBACK_STALL_MS) {
+        cpvt->playback_failed = 1;
+        ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback still not consuming after restart; ending call\n", PVT_ID(pvt));
+        channel_enqueue_hangup(channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
+        return -EIO;
+    }
+    if (!cpvt->playback_validating && !cpvt->playback_recovery_attempted && now_ms >= 0 &&
+        cpvt->playback_stall_since_ms && cpvt->playback_blocked_callbacks >= 2 &&
+        cpvt->playback_last_write_blocked && before_avail >= 0 && !consumed &&
+        now_ms - cpvt->playback_stall_since_ms >= PLAYBACK_STALL_MS) {
+        cpvt->playback_recovery_attempted = 1;
+        cpvt->playback_validating = 1;
+        cpvt->playback_validation_since_ms = now_ms;
+        cpvt->playback_stall_since_ms = 0;
+        cpvt->playback_blocked_callbacks = 0;
+        cpvt->playback_avail_valid = 0;
+        cpvt->playback_last_write_blocked = 0;
+        ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback stopped consuming; restarting playback stream once\n", PVT_ID(pvt));
+        res = snd_pcm_drop(pvt->ocard);
+        if (!res) {
+            res = pcm_prepare_playback(pvt->ocard);
+        }
+        if (res < 0) {
+            cpvt->playback_failed = 1;
+            ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback restart failed: %s; ending call\n", PVT_ID(pvt), snd_strerror(res));
+            channel_enqueue_hangup(channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
+            return -EIO;
+        }
+        before_avail = -1;
     }
 
     pcm_show_state(6, "PLAYBACK", PVT_ID(pvt), pvt->ocard);
@@ -809,6 +896,36 @@ static int channel_write_uac(struct ast_channel* attribute_unused(channel), stru
     }
 
 w_finish:
+    if (pvt->ocard && snd_pcm_state(pvt->ocard) == SND_PCM_STATE_RUNNING) {
+        after_avail = snd_pcm_avail(pvt->ocard);
+        if (before_avail >= 0 && after_avail >= 0 && after_avail + written > before_avail) {
+            consumed = 1;
+        }
+        if (after_avail >= 0) {
+            cpvt->playback_last_avail = after_avail;
+            cpvt->playback_avail_valid = 1;
+        } else {
+            cpvt->playback_avail_valid = 0;
+        }
+    } else {
+        cpvt->playback_avail_valid = 0;
+    }
+    if (consumed) {
+        playback_consumed(cpvt, pvt);
+    } else if (!cpvt->playback_validating && !cpvt->playback_recovery_attempted && now_ms >= 0 && after_avail >= 0 &&
+               written == 0 && res == -EAGAIN) {
+        if (!cpvt->playback_stall_since_ms) {
+            cpvt->playback_stall_since_ms = now_ms;
+        }
+        cpvt->playback_blocked_callbacks++;
+        cpvt->playback_last_write_blocked = 1;
+    } else if (written > 0) {
+        cpvt->playback_last_write_blocked = 0;
+    } else if (!cpvt->playback_validating) {
+        cpvt->playback_stall_since_ms = 0;
+        cpvt->playback_blocked_callbacks = 0;
+        cpvt->playback_last_write_blocked = 0;
+    }
     if (written > 0) {
         PVT_STAT(pvt, write_frames)++;
         PVT_STAT(pvt, a_write_bytes) += written * sizeof(int16_t);
