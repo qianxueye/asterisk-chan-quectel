@@ -118,6 +118,7 @@ static int write_offsets[512], write_sizes[512], start_error, transient_start_er
 static snd_pcm_sframes_t playback_avail;
 static long fake_now_ms;
 static int playback_block_until_drop, playback_block_after_drop, playback_drop_error, playback_prepare_error;
+static int playback_consume_during_write;
 static int start_calls, capture_prepare_calls, playback_prepare_calls;
 static int sequence, start_sequence, fd_sequence, tty_reads, tty_writes;
 static int close_calls, timer_closes, relinks, restates, link_calls, hangups;
@@ -207,6 +208,7 @@ static int snd_pcm_mmap_writei(snd_pcm_t *pcm, const void *data, size_t frames)
     if (result > 0) {
         playback_avail -= result;
         if (pcm->state == SND_PCM_STATE_PREPARED && playback_avail <= 7200) pcm->state = SND_PCM_STATE_RUNNING;
+        if (pcm->state == SND_PCM_STATE_RUNNING) playback_avail += playback_consume_during_write;
     }
     return result;
 }
@@ -301,6 +303,7 @@ static void reset(struct pvt *pvt, struct cpvt *cpvt, struct ast_channel *channe
     avail_result = 160; read_result = 0; write_count = write_index = 0;
     playback_avail = 8000; fake_now_ms = 1000;
     playback_block_until_drop = playback_block_after_drop = playback_drop_error = playback_prepare_error = 0;
+    playback_consume_during_write = 0;
     transient_start_errors = start_error = 0;
     start_calls = capture_prepare_calls = playback_prepare_calls = 0;
     sequence = start_sequence = fd_sequence = 0;
@@ -625,6 +628,61 @@ static void test_playback_attempt_cap_survives_master_change(void)
     assert(ended && hangups == 1 && playback.drops == drops_at_resume);
 }
 
+static void test_consumption_during_write_validates_restart(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 1 && a.playback_validating);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 1000;
+    playback_consume_during_write = 160;
+    fake_now_ms += 20;
+    assert(channel_write(&ca, &f) == 0);
+    assert(playback_avail == 1000 && !a.playback_validating && !a.playback_failed);
+    assert(playback.drops == 1 && capture.drops == 0 && hangups == 0);
+}
+
+static void test_second_stall_ends_call_without_restart(void)
+{
+    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
+        .data.ptr = data, .subclass.format = &format };
+    reset(&p, &a, &ca); cpvt_call_activate(&a);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 120;
+    playback_block_until_drop = 1;
+    write_origin = data;
+    for (int i = 0; i < 105; ++i) {
+        fake_now_ms += 20;
+        assert(channel_write(&ca, &f) == 0);
+    }
+    assert(playback.drops == 1 && a.playback_validating);
+    playback.state = SND_PCM_STATE_RUNNING;
+    playback_avail = 1000;
+    playback_consume_during_write = 160;
+    fake_now_ms += 20;
+    assert(channel_write(&ca, &f) == 0 && !a.playback_validating);
+    playback_consume_during_write = 0;
+    playback_avail = 120;
+    int ended = 0;
+    for (int i = 0; i < 110; ++i) {
+        fake_now_ms += 20;
+        if (channel_write(&ca, &f) == -1) { ended = 1; break; }
+    }
+    assert(ended && a.playback_failed && hangups == 1 && playback.drops == 1);
+    assert(channel_write(&ca, &f) == -1 && hangups == 1 && playback.drops == 1);
+}
+
 static void test_last_channel_cleanup(void)
 {
     struct pvt p; struct cpvt unused; struct ast_channel ca; struct ast_timer timer = {7};
@@ -673,9 +731,11 @@ int main(void)
     test_playback_accepts_without_consuming();
     test_playback_gap_resets_observation();
     test_playback_attempt_cap_survives_master_change();
+    test_consumption_during_write_validates_restart();
+    test_second_stall_ends_call_without_restart();
     test_last_channel_cleanup();
     test_disconnect_frees_all_channels();
-    puts("Audio lifecycle regressions: 14 scenario groups passed");
+    puts("Audio lifecycle regressions: 16 scenario groups passed");
     return 0;
 }
 

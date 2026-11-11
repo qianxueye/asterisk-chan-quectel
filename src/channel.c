@@ -836,10 +836,16 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
         channel_enqueue_hangup(channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
         return -EIO;
     }
-    if (!cpvt->playback_validating && !cpvt->playback_recovery_attempted && now_ms >= 0 &&
+    if (!cpvt->playback_validating && now_ms >= 0 &&
         cpvt->playback_stall_since_ms && cpvt->playback_blocked_callbacks >= 2 &&
         cpvt->playback_last_write_blocked && before_avail >= 0 && !consumed &&
         now_ms - cpvt->playback_stall_since_ms >= PLAYBACK_STALL_MS) {
+        if (cpvt->playback_recovery_attempted) {
+            cpvt->playback_failed = 1;
+            ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback stopped consuming again after restart; ending call\n", PVT_ID(pvt));
+            channel_enqueue_hangup(channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
+            return -EIO;
+        }
         cpvt->playback_recovery_attempted = 1;
         cpvt->playback_validating = 1;
         cpvt->playback_validation_since_ms = now_ms;
@@ -912,7 +918,7 @@ w_finish:
     }
     if (consumed) {
         playback_consumed(cpvt, pvt);
-    } else if (!cpvt->playback_validating && !cpvt->playback_recovery_attempted && now_ms >= 0 && after_avail >= 0 &&
+    } else if (!cpvt->playback_validating && now_ms >= 0 && after_avail >= 0 &&
                written == 0 && res == -EAGAIN) {
         if (!cpvt->playback_stall_since_ms) {
             cpvt->playback_stall_since_ms = now_ms;
