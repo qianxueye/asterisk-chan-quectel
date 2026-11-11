@@ -13,9 +13,10 @@
    By Matthew Fredrickson <creslin@digium.com>
 */
 
+#include <time.h>
+
 #include "ast_config.h"
 
-#include <time.h>
 #include <asterisk/callerid.h> /*  AST_PRES_* */
 #include <asterisk/causes.h>
 #include <asterisk/format_cache.h>
@@ -772,8 +773,8 @@ static int64_t playback_clock_ms(void)
 
 static void playback_consumed(struct cpvt* cpvt, const struct pvt* pvt)
 {
-    cpvt->playback_stall_since_ms = 0;
-    cpvt->playback_blocked_callbacks = 0;
+    cpvt->playback_stall_since_ms     = 0;
+    cpvt->playback_blocked_callbacks  = 0;
     cpvt->playback_last_write_blocked = 0;
     if (cpvt->playback_validating) {
         cpvt->playback_validating = 0;
@@ -784,13 +785,14 @@ static void playback_consumed(struct cpvt* cpvt, const struct pvt* pvt)
 static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, struct cpvt* cpvt, struct pvt* pvt)
 {
     enum { PLAYBACK_MEDIA_GAP_MS = 500, PLAYBACK_STALL_MS = 2000 };
-    const int samples = f->samples;
-    int written       = 0;
-    int recovered     = 0;
-    int consumed      = 0;
+
+    const int samples              = f->samples;
+    int written                    = 0;
+    int recovered                  = 0;
+    int consumed                   = 0;
     snd_pcm_sframes_t before_avail = -1;
-    snd_pcm_sframes_t after_avail = -1;
-    const int64_t now_ms = playback_clock_ms();
+    snd_pcm_sframes_t after_avail  = -1;
+    const int64_t now_ms           = playback_clock_ms();
 
     if (cpvt->playback_failed) {
         return -EIO;
@@ -803,9 +805,9 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
             cpvt->playback_validation_since_ms = now_ms;
         }
         if (cpvt->playback_last_media_ms && now_ms - cpvt->playback_last_media_ms > PLAYBACK_MEDIA_GAP_MS) {
-            cpvt->playback_stall_since_ms = 0;
-            cpvt->playback_blocked_callbacks = 0;
-            cpvt->playback_avail_valid = 0;
+            cpvt->playback_stall_since_ms     = 0;
+            cpvt->playback_blocked_callbacks  = 0;
+            cpvt->playback_avail_valid        = 0;
             cpvt->playback_last_write_blocked = 0;
             if (cpvt->playback_validating) {
                 cpvt->playback_validation_since_ms = now_ms;
@@ -814,7 +816,7 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
         cpvt->playback_last_media_ms = now_ms;
     }
 
-    int res           = pcm_prepare_playback(pvt->ocard);
+    int res = pcm_prepare_playback(pvt->ocard);
 
     if (res < 0) {
         goto w_finish;
@@ -829,30 +831,27 @@ static int channel_write_uac(struct ast_channel* channel, struct ast_frame* f, s
     if (consumed) {
         playback_consumed(cpvt, pvt);
     }
-    if (cpvt->playback_validating && now_ms >= 0 && cpvt->playback_validation_since_ms &&
-        now_ms - cpvt->playback_validation_since_ms >= PLAYBACK_STALL_MS) {
+    if (cpvt->playback_validating && now_ms >= 0 && cpvt->playback_validation_since_ms && now_ms - cpvt->playback_validation_since_ms >= PLAYBACK_STALL_MS) {
         cpvt->playback_failed = 1;
         ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback still not consuming after restart; ending call\n", PVT_ID(pvt));
         channel_enqueue_hangup(channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
         return -EIO;
     }
-    if (!cpvt->playback_validating && now_ms >= 0 &&
-        cpvt->playback_stall_since_ms && cpvt->playback_blocked_callbacks >= 2 &&
-        cpvt->playback_last_write_blocked && before_avail >= 0 && !consumed &&
-        now_ms - cpvt->playback_stall_since_ms >= PLAYBACK_STALL_MS) {
+    if (!cpvt->playback_validating && now_ms >= 0 && cpvt->playback_stall_since_ms && cpvt->playback_blocked_callbacks >= 2 &&
+        cpvt->playback_last_write_blocked && before_avail >= 0 && !consumed && now_ms - cpvt->playback_stall_since_ms >= PLAYBACK_STALL_MS) {
         if (cpvt->playback_recovery_attempted) {
             cpvt->playback_failed = 1;
             ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback stopped consuming again after restart; ending call\n", PVT_ID(pvt));
             channel_enqueue_hangup(channel, AST_CAUSE_REQUESTED_CHAN_UNAVAIL);
             return -EIO;
         }
-        cpvt->playback_recovery_attempted = 1;
-        cpvt->playback_validating = 1;
+        cpvt->playback_recovery_attempted  = 1;
+        cpvt->playback_validating          = 1;
         cpvt->playback_validation_since_ms = now_ms;
-        cpvt->playback_stall_since_ms = 0;
-        cpvt->playback_blocked_callbacks = 0;
-        cpvt->playback_avail_valid = 0;
-        cpvt->playback_last_write_blocked = 0;
+        cpvt->playback_stall_since_ms      = 0;
+        cpvt->playback_blocked_callbacks   = 0;
+        cpvt->playback_avail_valid         = 0;
+        cpvt->playback_last_write_blocked  = 0;
         ast_log(LOG_WARNING, "[%s][ALSA][PLAYBACK] Playback stopped consuming; restarting playback stream once\n", PVT_ID(pvt));
         res = snd_pcm_drop(pvt->ocard);
         if (!res) {
@@ -908,7 +907,7 @@ w_finish:
             consumed = 1;
         }
         if (after_avail >= 0) {
-            cpvt->playback_last_avail = after_avail;
+            cpvt->playback_last_avail  = after_avail;
             cpvt->playback_avail_valid = 1;
         } else {
             cpvt->playback_avail_valid = 0;
@@ -918,8 +917,7 @@ w_finish:
     }
     if (consumed) {
         playback_consumed(cpvt, pvt);
-    } else if (!cpvt->playback_validating && now_ms >= 0 && after_avail >= 0 &&
-               written == 0 && res == -EAGAIN) {
+    } else if (!cpvt->playback_validating && now_ms >= 0 && after_avail >= 0 && written == 0 && res == -EAGAIN) {
         if (!cpvt->playback_stall_since_ms) {
             cpvt->playback_stall_since_ms = now_ms;
         }
@@ -928,8 +926,8 @@ w_finish:
     } else if (written > 0) {
         cpvt->playback_last_write_blocked = 0;
     } else if (!cpvt->playback_validating) {
-        cpvt->playback_stall_since_ms = 0;
-        cpvt->playback_blocked_callbacks = 0;
+        cpvt->playback_stall_since_ms     = 0;
+        cpvt->playback_blocked_callbacks  = 0;
         cpvt->playback_last_write_blocked = 0;
     }
     if (written > 0) {

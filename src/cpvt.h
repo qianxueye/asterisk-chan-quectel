@@ -4,8 +4,8 @@
 #ifndef CHAN_QUECTEL_CPVT_H_INCLUDED
 #define CHAN_QUECTEL_CPVT_H_INCLUDED
 
-#include <stdint.h>
 #include <ptime-config.h>
+#include <stdint.h>
 
 #include "ast_config.h"
 
@@ -81,11 +81,11 @@ typedef struct cpvt {
     int64_t playback_validation_since_ms;
     long playback_last_avail;
     unsigned int playback_blocked_callbacks;
-    unsigned int playback_avail_valid : 1;
-    unsigned int playback_last_write_blocked : 1;
-    unsigned int playback_recovery_attempted : 1;
-    unsigned int playback_validating : 1;
-    unsigned int playback_failed : 1;
+    unsigned int playback_avail_valid       :1;
+    unsigned int playback_last_write_blocked:1;
+    unsigned int playback_recovery_attempted:1;
+    unsigned int playback_validating        :1;
+    unsigned int playback_failed            :1;
 } cpvt_t;
 
 #define CPVT_SET_FLAG(cpvt, flag) ast_set2_flag(cpvt, 1, flag)

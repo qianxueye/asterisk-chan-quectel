@@ -162,13 +162,13 @@ static void cpvt_stop_uac(struct pvt* const pvt)
 
 static void cpvt_reset_playback_observation(struct cpvt* const cpvt, int activated)
 {
-    cpvt->playback_last_media_ms = 0;
-    cpvt->playback_stall_since_ms = 0;
+    cpvt->playback_last_media_ms       = 0;
+    cpvt->playback_stall_since_ms      = 0;
     cpvt->playback_validation_since_ms = 0;
-    cpvt->playback_blocked_callbacks = 0;
-    cpvt->playback_avail_valid = 0;
-    cpvt->playback_last_write_blocked = 0;
-    cpvt->playback_validating = activated && cpvt->playback_recovery_attempted;
+    cpvt->playback_blocked_callbacks   = 0;
+    cpvt->playback_avail_valid         = 0;
+    cpvt->playback_last_write_blocked  = 0;
+    cpvt->playback_validating          = activated && cpvt->playback_recovery_attempted;
 }
 
 void cpvt_call_disactivate(struct cpvt* const cpvt)
