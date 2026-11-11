@@ -410,7 +410,7 @@ static void test_capture_recovery(void)
 
 static void test_playback_progress_and_recovery(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     write_origin = data;
@@ -441,7 +441,7 @@ static void test_playback_progress_and_recovery(void)
 
 static void test_running_playback_stall(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -460,7 +460,7 @@ static void test_running_playback_stall(void)
 
 static void test_transient_playback_congestion(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -478,7 +478,7 @@ static void test_transient_playback_congestion(void)
 
 static void test_playback_recovery_validation(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -502,7 +502,7 @@ static void test_playback_recovery_validation(void)
 
 static void test_playback_terminal_failures(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     for (int failure = 0; failure < 3; ++failure) {
@@ -527,7 +527,7 @@ static void test_playback_terminal_failures(void)
 
 static void test_playback_observation_resets_on_hold(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -554,7 +554,7 @@ static void test_playback_observation_resets_on_hold(void)
 
 static void test_playback_accepts_without_consuming(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -574,7 +574,7 @@ static void test_playback_accepts_without_consuming(void)
 
 static void test_playback_gap_resets_observation(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -596,7 +596,7 @@ static void test_playback_gap_resets_observation(void)
 
 static void test_playback_attempt_cap_survives_master_change(void)
 {
-    struct pvt p; struct cpvt a, b; struct ast_channel ca, cb; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a, b; struct ast_channel ca, cb; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -630,7 +630,7 @@ static void test_playback_attempt_cap_survives_master_change(void)
 
 static void test_consumption_during_write_validates_restart(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
@@ -654,7 +654,7 @@ static void test_consumption_during_write_validates_restart(void)
 
 static void test_second_stall_ends_call_without_restart(void)
 {
-    struct pvt p; struct cpvt a; struct ast_channel ca; int16_t data[160] = {0};
+    struct pvt p; struct cpvt a; struct ast_channel ca; static int16_t data[160];
     struct ast_frame f = { .frametype = AST_FRAME_VOICE, .samples = 160, .datalen = 320,
         .data.ptr = data, .subclass.format = &format };
     reset(&p, &a, &ca); cpvt_call_activate(&a);
